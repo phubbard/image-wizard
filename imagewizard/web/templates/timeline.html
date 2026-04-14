@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="stats-bar">{{ total }} photos</div>
+<div class="grid" id="photo-grid">
+    {% include "_photo_grid.html" %}
+</div>
+<script>
+// Restore scroll position on back-navigation
+if (history.scrollRestoration) history.scrollRestoration = 'auto';
+</script>
+{% endblock %}

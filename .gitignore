@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Models / weights (downloaded at runtime)
+*.pt
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# image-wizard data (never commit user data)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# uv
+uv.lock

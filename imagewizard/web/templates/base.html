@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>image-wizard{% block title_extra %}{% endblock %}</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --bg2: #16213e;
+            --fg: #e0e0e0;
+            --accent: #0f3460;
+            --highlight: #e94560;
+            --card: #1f2940;
+            --border: #2a3a5c;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            min-height: 100vh;
+        }
+        nav {
+            background: var(--bg2);
+            padding: 0.8rem 1.5rem;
+            display: flex;
+            gap: 1.5rem;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        nav a {
+            color: var(--fg);
+            text-decoration: none;
+            font-size: 0.95rem;
+        }
+        nav a:hover { color: var(--highlight); }
+        nav .brand { font-weight: 700; font-size: 1.1rem; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 1rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 0.5rem;
+        }
+        .grid a { display: block; position: relative; }
+        .grid img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+            border-radius: 4px;
+            display: block;
+        }
+        .grid .caption {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0,0,0,0.6);
+            padding: 2px 6px;
+            font-size: 0.7rem;
+            border-radius: 0 0 4px 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        h1, h2 { margin: 1rem 0 0.5rem; }
+        table { border-collapse: collapse; margin: 0.5rem 0; }
+        td, th { padding: 0.3rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); }
+        .pill {
+            display: inline-block;
+            background: var(--accent);
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            margin: 2px;
+        }
+        form label { display: block; margin-top: 0.5rem; font-size: 0.85rem; }
+        input, select {
+            background: var(--card);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 0.4rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        button, .btn {
+            background: var(--highlight);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        button:hover { opacity: 0.85; }
+        .detail-img { max-width: 100%; max-height: 70vh; border-radius: 6px; }
+        .sidebar { background: var(--card); padding: 1rem; border-radius: 6px; }
+        .two-col { display: grid; grid-template-columns: 1fr 350px; gap: 1rem; align-items: start; }
+        @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
+        .face-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 1rem;
+        }
+        .face-card {
+            background: var(--card);
+            border-radius: 6px;
+            padding: 0.5rem;
+            text-align: center;
+        }
+        .face-card img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+        .face-card form { margin-top: 0.3rem; }
+        .face-card input[type=text] { width: 100%; margin-bottom: 0.3rem; }
+        .stats-bar { font-size: 0.85rem; color: #999; margin-bottom: 0.5rem; }
+    </style>
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+    <nav>
+        <a href="/" class="brand">image-wizard</a>
+        <a href="/">Timeline</a>
+        <a href="/search">Search</a>
+        <a href="/faces">Faces</a>
+        <a href="/map">Map</a>
+    </nav>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

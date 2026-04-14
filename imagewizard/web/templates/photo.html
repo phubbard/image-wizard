@@ -1,0 +1,294 @@
+{% extends "base.html" %}
+{% block title_extra %} — {{ file['path'].split('/')[-1] }}{% endblock %}
+{% block head_extra %}
+<style>
+    .img-wrap {
+        position: relative;
+        display: inline-block;
+        line-height: 0;
+        cursor: pointer;
+    }
+    .img-wrap img { max-width: 100%; max-height: 70vh; border-radius: 6px; }
+    .bbox {
+        position: absolute;
+        border: 2px solid;
+        border-radius: 3px;
+        transition: opacity 0.2s;
+    }
+    .bbox.det  { pointer-events: none; border-color: #4ecdc4; }
+    .bbox.face { pointer-events: auto; cursor: pointer; border-color: #f7b731; }
+    .bbox.face:hover { border-color: #fff; box-shadow: 0 0 8px rgba(247,183,49,0.6); }
+    .bbox-label {
+        position: absolute;
+        top: -18px;
+        left: -1px;
+        font-size: 0.65rem;
+        padding: 1px 5px;
+        border-radius: 3px 3px 0 0;
+        white-space: nowrap;
+        pointer-events: none;
+    }
+    .bbox.det .bbox-label { background: #4ecdc4; color: #000; }
+    .bbox.face .bbox-label { background: #f7b731; color: #000; }
+    .bbox.face.active { border-color: #fff; border-width: 3px; }
+    .bbox.hidden { opacity: 0; pointer-events: none; }
+
+    /* Inline name popover anchored to bbox */
+    .face-popover {
+        position: absolute;
+        bottom: -36px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 4px;
+        z-index: 50;
+        white-space: nowrap;
+    }
+    .face-popover input[type=text] {
+        width: 130px;
+        font-size: 0.8rem;
+        padding: 0.25rem 0.4rem;
+        background: var(--card);
+        color: var(--fg);
+        border: 1px solid #f7b731;
+        border-radius: 4px;
+    }
+    .face-popover input[type=text]:focus { outline: none; border-color: #fff; }
+    .face-popover button {
+        font-size: 0.7rem;
+        padding: 0.25rem 0.5rem;
+        background: #f7b731;
+        color: #000;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+    .face-popover button.cancel-btn { background: #666; color: #fff; }
+
+    .toggle-bar { margin: 0.5rem 0; display: flex; gap: 1rem; align-items: center; }
+    .toggle-bar label { font-size: 0.85rem; cursor: pointer; user-select: none; }
+    .toggle-bar input[type=checkbox] { accent-color: var(--highlight); }
+    .full-link { font-size: 0.8rem; color: #999; margin-left: auto; }
+    .full-link:hover { color: var(--highlight); }
+    .face-list-entry {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 0.25rem 0;
+        font-size: 0.85rem;
+    }
+    .face-list-entry .dot {
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        background: #f7b731;
+        flex-shrink: 0;
+    }
+</style>
+{% endblock %}
+{% block content %}
+<div class="two-col">
+    <div>
+        <div class="toggle-bar">
+            {% if detections %}
+            <label><input type="checkbox" id="toggle-objects" checked> Objects</label>
+            {% endif %}
+            {% if faces %}
+            <label><input type="checkbox" id="toggle-faces" checked> Faces</label>
+            {% endif %}
+            <a href="/full/{{ file['id'] }}" target="_blank" class="full-link">View full image</a>
+        </div>
+        <div class="img-wrap" id="img-wrap">
+            <img src="/full/{{ file['id'] }}" id="detail-img" alt=""
+                 onload="placeBboxes()">
+
+            {% for d in detections %}
+            <div class="bbox det" data-type="det"
+                 data-x="{{ d['x'] }}" data-y="{{ d['y'] }}"
+                 data-w="{{ d['w'] }}" data-h="{{ d['h'] }}">
+                <span class="bbox-label">{{ d['label'] }} {{ "%.0f"|format(d['conf']*100) }}%</span>
+            </div>
+            {% endfor %}
+
+            {% for f in faces %}
+            <div class="bbox face" data-type="face"
+                 data-face-id="{{ f['id'] }}"
+                 data-face-name="{{ f['person_name'] or '' }}"
+                 data-x="{{ f['x'] }}" data-y="{{ f['y'] }}"
+                 data-w="{{ f['w'] }}" data-h="{{ f['h'] }}">
+                <span class="bbox-label">{{ f['person_name'] or 'Click to name' }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="sidebar">
+        <h2>{{ file['path'].split('/')[-1] }}</h2>
+        <table>
+            {% if meta %}
+            {% if meta['taken_at'] %}<tr><td>Date</td><td>{{ meta['taken_at'] }}</td></tr>{% endif %}
+            {% if meta['camera_make'] %}<tr><td>Make</td><td>{{ meta['camera_make'] }}</td></tr>{% endif %}
+            {% if meta['camera_model'] %}<tr><td>Model</td><td>{{ meta['camera_model'] }}</td></tr>{% endif %}
+            {% if meta['lens'] %}<tr><td>Lens</td><td>{{ meta['lens'] }}</td></tr>{% endif %}
+            {% if meta['iso'] %}<tr><td>ISO</td><td>{{ meta['iso'] }}</td></tr>{% endif %}
+            {% if meta['aperture'] %}<tr><td>Aperture</td><td>f/{{ meta['aperture'] }}</td></tr>{% endif %}
+            {% if meta['shutter'] %}<tr><td>Shutter</td><td>{{ meta['shutter'] }}s</td></tr>{% endif %}
+            {% if meta['focal_mm'] %}<tr><td>Focal</td><td>{{ meta['focal_mm'] }}mm</td></tr>{% endif %}
+            {% if meta['city'] %}<tr><td>Location</td><td>{{ meta['city'] }}, {{ meta['country'] }}</td></tr>{% endif %}
+            {% if meta['lat'] %}<tr><td>GPS</td><td>{{ "%.5f"|format(meta['lat']) }}, {{ "%.5f"|format(meta['lon']) }}</td></tr>{% endif %}
+            {% endif %}
+            <tr><td>Size</td><td>{{ file['width'] }}×{{ file['height'] }}</td></tr>
+            <tr><td>File</td><td style="word-break:break-all;font-size:0.75rem;">{{ file['path'] }}</td></tr>
+        </table>
+
+        {% if detections %}
+        <h3 style="margin-top:1rem;">Objects ({{ detections|length }})</h3>
+        <div>
+            {% for d in detections %}
+            <span class="pill">{{ d['label'] }} {{ "%.0f"|format(d['conf']*100) }}%</span>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if faces %}
+        <h3 style="margin-top:1rem;">Faces ({{ faces|length }})</h3>
+        {% for f in faces %}
+        <div class="face-list-entry" data-sidebar-face="{{ f['id'] }}">
+            <span class="dot"></span>
+            <span>{{ f['person_name'] or 'Unnamed' }}</span>
+            <span style="color:#666;font-size:0.75rem;">
+                {{ "%.0f"|format(f['det_score']*100) }}%
+                {% if f['cluster_id'] %} · cluster #{{ f['cluster_id'] }}{% endif %}
+            </span>
+        </div>
+        {% endfor %}
+        <div style="margin-top:0.4rem;font-size:0.75rem;color:#666;">
+            Click a face bbox on the image to name it.
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+const FILE_ID = {{ file['id'] }};
+
+function placeBboxes() {
+    const img = document.getElementById('detail-img');
+    const imgW = img.clientWidth;
+    const imgH = img.clientHeight;
+
+    document.querySelectorAll('.bbox').forEach(el => {
+        const x = parseFloat(el.dataset.x);
+        const y = parseFloat(el.dataset.y);
+        const w = parseFloat(el.dataset.w);
+        const h = parseFloat(el.dataset.h);
+
+        if (el.dataset.type === 'det') {
+            el.style.left   = ((x - w/2) * imgW) + 'px';
+            el.style.top    = ((y - h/2) * imgH) + 'px';
+            el.style.width  = (w * imgW) + 'px';
+            el.style.height = (h * imgH) + 'px';
+        } else {
+            el.style.left   = (x * imgW) + 'px';
+            el.style.top    = (y * imgH) + 'px';
+            el.style.width  = (w * imgW) + 'px';
+            el.style.height = (h * imgH) + 'px';
+        }
+    });
+}
+
+window.addEventListener('resize', placeBboxes);
+
+// Close any open popover
+function closePopover() {
+    document.querySelectorAll('.face-popover').forEach(p => p.remove());
+    document.querySelectorAll('.bbox.face.active').forEach(b => b.classList.remove('active'));
+}
+
+// Face bbox click → inline name popover
+document.querySelectorAll('.bbox.face').forEach(el => {
+    el.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const alreadyActive = this.classList.contains('active');
+        closePopover();
+        if (alreadyActive) return;
+
+        this.classList.add('active');
+        const faceId = this.dataset.faceId;
+        const currentName = this.dataset.faceName;
+
+        const pop = document.createElement('div');
+        pop.className = 'face-popover';
+        pop.innerHTML = `
+            <input type="text" placeholder="Name this person" value="${currentName}">
+            <button class="save-btn">Save</button>
+            <button class="cancel-btn">×</button>
+        `;
+        this.appendChild(pop);
+
+        const input = pop.querySelector('input');
+        input.focus();
+        input.select();
+
+        const saveName = () => {
+            const name = input.value.trim();
+            if (!name) return;
+            // POST via fetch, then update UI in-place
+            const form = new FormData();
+            form.append('name', name);
+            form.append('file_id', FILE_ID);
+            fetch(`/face/${faceId}/name`, { method: 'POST', body: form })
+                .then(() => {
+                    // Update bbox label
+                    el.querySelector('.bbox-label').textContent = name;
+                    el.dataset.faceName = name;
+                    // Update sidebar
+                    const sidebar = document.querySelector(`[data-sidebar-face="${faceId}"] span:nth-child(2)`);
+                    if (sidebar) sidebar.textContent = name;
+                    closePopover();
+                });
+        };
+
+        pop.querySelector('.save-btn').addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            saveName();
+        });
+        pop.querySelector('.cancel-btn').addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            closePopover();
+        });
+        input.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') { ev.preventDefault(); saveName(); }
+            if (ev.key === 'Escape') { ev.preventDefault(); closePopover(); }
+        });
+    });
+});
+
+// Click on image (outside any face) → open full image
+document.getElementById('img-wrap').addEventListener('click', function(e) {
+    // Only if the click wasn't captured by a face bbox
+    if (!e.target.closest('.bbox.face')) {
+        closePopover();
+        window.open(`/full/${FILE_ID}`, '_blank');
+    }
+});
+
+// Close popover when clicking outside the image area
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.img-wrap')) {
+        closePopover();
+    }
+});
+
+// Toggle visibility
+document.getElementById('toggle-objects')?.addEventListener('change', function() {
+    document.querySelectorAll('.bbox.det').forEach(el => {
+        el.classList.toggle('hidden', !this.checked);
+    });
+});
+document.getElementById('toggle-faces')?.addEventListener('change', function() {
+    document.querySelectorAll('.bbox.face').forEach(el => {
+        el.classList.toggle('hidden', !this.checked);
+    });
+    closePopover();
+});
+</script>
+{% endblock %}

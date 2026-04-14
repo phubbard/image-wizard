@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title_extra %} — Map{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+    #map { height: calc(100vh - 80px); border-radius: 6px; }
+</style>
+{% endblock %}
+{% block content %}
+<div id="map"></div>
+<script>
+    const map = L.map('map').setView([20, 0], 2);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    const points = [
+        {% for p in points %}
+        {
+            id: {{ p['id'] }},
+            lat: {{ p['lat'] }},
+            lon: {{ p['lon'] }},
+            hash: "{{ p['content_hash'] }}",
+            city: "{{ (p['city'] or '')|e }}",
+            country: "{{ (p['country'] or '')|e }}",
+            date: "{{ (p['taken_at'] or '')[:10] }}"
+        },
+        {% endfor %}
+    ];
+
+    const markers = L.markerClusterGroup ? L.markerClusterGroup() : L.layerGroup();
+
+    points.forEach(p => {
+        const marker = L.circleMarker([p.lat, p.lon], {
+            radius: 5, fillColor: '#e94560', color: '#e94560',
+            weight: 1, opacity: 0.8, fillOpacity: 0.6
+        });
+        marker.bindPopup(
+            `<a href="/photo/${p.id}"><img src="/thumb/${p.hash}" style="width:120px;border-radius:4px;"></a>` +
+            `<br><small>${p.date} · ${p.city}, ${p.country}</small>`
+        );
+        markers.addLayer(marker);
+    });
+    markers.addTo(map);
+
+    if (points.length > 0) {
+        const bounds = points.map(p => [p.lat, p.lon]);
+        map.fitBounds(bounds, { padding: [30, 30] });
+    }
+</script>
+{% endblock %}
