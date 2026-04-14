@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title_extra %} — {{ camera_model }}{% endblock %}
+{% block content %}
+<h1>{{ camera_model }}</h1>
+<div class="stats-bar">{{ total }} photos</div>
+<div class="grid">
+    {% for p in photos %}
+    <a href="/photo/{{ p['id'] }}">
+        <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
+             alt="{{ p['taken_at'] or '' }}">
+        <span class="caption">
+            {{ (p['taken_at'] or '')[:10] }}
+            {% if p['city'] %} · {{ p['city'] }}{% endif %}
+        </span>
+    </a>
+    {% endfor %}
+</div>
+{% if page > 0 or has_next %}
+<div style="display:flex;gap:1rem;justify-content:center;margin-top:1rem;">
+    {% if page > 0 %}
+    <a href="/camera/{{ camera_model|urlencode }}?page={{ page - 1 }}" class="btn">Previous</a>
+    {% endif %}
+    <span style="color:#999;align-self:center;">Page {{ page + 1 }}</span>
+    {% if has_next %}
+    <a href="/camera/{{ camera_model|urlencode }}?page={{ page + 1 }}" class="btn">Next</a>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

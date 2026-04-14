@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title_extra %} — Cameras{% endblock %}
+{% block head_extra %}
+<style>
+    .camera-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 0.8rem;
+    }
+    .camera-card {
+        background: var(--card);
+        border-radius: 6px;
+        padding: 1rem;
+        border: 1px solid var(--border);
+        transition: border-color 0.15s;
+    }
+    .camera-card:hover { border-color: var(--highlight); }
+    .camera-card a { color: var(--fg); text-decoration: none; }
+    .camera-card .model { font-size: 1.05rem; font-weight: 600; }
+    .camera-card .make { font-size: 0.8rem; color: #999; }
+    .camera-card .stats { font-size: 0.85rem; color: #aaa; margin-top: 0.4rem; }
+    .camera-card .bar {
+        height: 4px;
+        background: var(--highlight);
+        border-radius: 2px;
+        margin-top: 0.5rem;
+    }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Cameras ({{ cameras|length }})</h1>
+{% if cameras %}
+{% set max_count = cameras[0]['cnt'] %}
+<div class="camera-list">
+    {% for c in cameras %}
+    <div class="camera-card">
+        <a href="/camera/{{ c['camera_model']|urlencode }}">
+            <div class="model">{{ c['camera_model'] }}</div>
+            {% if c['camera_make'] %}
+            <div class="make">{{ c['camera_make'] }}</div>
+            {% endif %}
+            <div class="stats">
+                {{ c['cnt'] }} photos
+                · {{ (c['first_seen'] or '')[:4] }}–{{ (c['last_seen'] or '')[:4] }}
+            </div>
+            <div class="bar" style="width: {{ (c['cnt'] / max_count * 100)|round }}%;"></div>
+        </a>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p style="color:#999;margin-top:2rem;">No camera metadata found. Run <code>image-wizard index</code> first.</p>
+{% endif %}
+{% endblock %}

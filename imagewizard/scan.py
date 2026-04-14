@@ -232,3 +232,51 @@ def register(parent: typer.Typer) -> None:
             Console().print(f"  dropped: {dropped} small images (< {min_pixels}px)")
         finally:
             conn.close()
+
+    @parent.command(name="regen-thumbs")
+    def cmd_regen_thumbs(
+        workers: int = typer.Option(4, "--workers", "-w", help="Decode threads."),
+    ) -> None:
+        """Regenerate missing thumbnails (e.g. after clearing the cache)."""
+        from concurrent.futures import ThreadPoolExecutor
+        from .decode import load_image
+        from .thumbs import ensure_thumbnail, thumb_path
+
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console(stderr=True)
+        try:
+            rows = conn.execute(
+                "SELECT id, path, content_hash FROM files WHERE missing=0"
+            ).fetchall()
+            # Filter to only those missing a thumbnail
+            todo = [
+                r for r in rows
+                if not thumb_path(cfg.cache_dir, r["content_hash"]).exists()
+            ]
+            console.print(f"{len(todo)} thumbnails to regenerate")
+            if not todo:
+                return
+
+            done = 0
+            errors = 0
+
+            def regen(row):
+                img = load_image(Path(row["path"]))
+                ensure_thumbnail(img, cfg.cache_dir, row["content_hash"])
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                from rich.progress import Progress, BarColumn, MofNCompleteColumn, SpinnerColumn
+                with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(), console=console) as prog:
+                    task = prog.add_task("thumbnails", total=len(todo))
+                    futures = {pool.submit(regen, r): r for r in todo}
+                    for fut in futures:
+                        try:
+                            fut.result()
+                            done += 1
+                        except Exception:
+                            errors += 1
+                        prog.advance(task)
+            Console().print(f"  done: {done}, errors: {errors}")
+        finally:
+            conn.close()

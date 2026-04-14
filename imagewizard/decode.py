@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,8 @@ def load_image(path: Path, max_pixels: int = 4096 * 4096) -> np.ndarray:
     else:
         _ensure_heif()
         pil = Image.open(path)
+        # Apply EXIF orientation before discarding metadata
+        pil = ImageOps.exif_transpose(pil)
         pil = pil.convert("RGB")
         rgb = np.array(pil)
 

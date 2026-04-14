@@ -31,24 +31,42 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     # ---- Routes ----
 
     @app.get("/", response_class=HTMLResponse)
-    async def timeline(request: Request, page: int = Query(0, ge=0)):
+    async def timeline(request: Request, page: int = Query(0, ge=0), year: str = Query("", description="Filter by year")):
         conn = get_conn()
         try:
             per_page = 60
-            total = conn.execute("SELECT COUNT(*) FROM files WHERE missing=0").fetchone()[0]
-            # When returning via back-button with /?page=N, load pages 0..N
-            # so the full scroll history is present and the browser can
-            # restore the scroll position.
+
+            # Available years for nav bar
+            years = [r[0] for r in conn.execute(
+                """SELECT DISTINCT SUBSTR(taken_at, 1, 4) AS yr
+                   FROM photo_meta WHERE taken_at IS NOT NULL
+                   ORDER BY yr DESC"""
+            ).fetchall()]
+
+            # Build WHERE clause
+            where = "f.missing = 0"
+            params: list = []
+            if year:
+                where += " AND pm.taken_at LIKE ?"
+                params.append(f"{year}%")
+
+            total = conn.execute(
+                f"""SELECT COUNT(*) FROM files f
+                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {where}""",
+                params,
+            ).fetchone()[0]
+
             load_count = (page + 1) * per_page
             rows = conn.execute(
-                """SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE f.missing = 0
+                   WHERE {where}
                    ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
                    LIMIT ?""",
-                (load_count,),
+                params + [load_count],
             ).fetchall()
             has_next = load_count < total
             return TEMPLATES.TemplateResponse(request, "timeline.html", {
@@ -56,33 +74,48 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
                 "total": total,
+                "years": years,
+                "year": year,
             })
         finally:
             conn.close()
 
     @app.get("/timeline-page", response_class=HTMLResponse)
-    async def timeline_page(request: Request, page: int = Query(0, ge=0)):
+    async def timeline_page(request: Request, page: int = Query(0, ge=0), year: str = Query("")):
         """htmx partial: next page of timeline thumbnails."""
         conn = get_conn()
         try:
             per_page = 60
             offset = page * per_page
+
+            where = "f.missing = 0"
+            params: list = []
+            if year:
+                where += " AND pm.taken_at LIKE ?"
+                params.append(f"{year}%")
+
             rows = conn.execute(
-                """SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE f.missing = 0
+                   WHERE {where}
                    ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
                    LIMIT ? OFFSET ?""",
-                (per_page, offset),
+                params + [per_page, offset],
             ).fetchall()
-            total = conn.execute("SELECT COUNT(*) FROM files WHERE missing=0").fetchone()[0]
+            total = conn.execute(
+                f"""SELECT COUNT(*) FROM files f
+                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {where}""",
+                params,
+            ).fetchone()[0]
             has_next = offset + per_page < total
             return TEMPLATES.TemplateResponse(request, "_photo_grid.html", {
                 "photos": rows,
                 "page": page,
                 "has_next": has_next,
+                "year": year,
             })
         finally:
             conn.close()
@@ -105,11 +138,38 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "SELECT id, cluster_id, person_name, det_score, x, y, w, h FROM faces WHERE file_id=?",
                 (file_id,),
             ).fetchall()
+
+            # Prev/next navigation (by date order, same as timeline)
+            taken_at = meta["taken_at"] if meta else None
+            sort_key = taken_at or str(f["mtime"])
+
+            prev_photo = conn.execute(
+                """SELECT f.id FROM files f
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE f.missing = 0
+                     AND COALESCE(pm.taken_at, f.mtime) > ?
+                   ORDER BY COALESCE(pm.taken_at, f.mtime) ASC
+                   LIMIT 1""",
+                (sort_key,),
+            ).fetchone()
+
+            next_photo = conn.execute(
+                """SELECT f.id FROM files f
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE f.missing = 0
+                     AND COALESCE(pm.taken_at, f.mtime) < ?
+                   ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+                   LIMIT 1""",
+                (sort_key,),
+            ).fetchone()
+
             return TEMPLATES.TemplateResponse(request, "photo.html", {
                 "file": f,
                 "meta": meta,
                 "detections": dets,
                 "faces": faces,
+                "prev_id": prev_photo["id"] if prev_photo else None,
+                "next_id": next_photo["id"] if next_photo else None,
             })
         finally:
             conn.close()
@@ -286,6 +346,60 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         finally:
             conn.close()
         return RedirectResponse(f"/photo/{file_id}", status_code=303)
+
+    @app.get("/cameras", response_class=HTMLResponse)
+    async def cameras_page(request: Request):
+        conn = get_conn()
+        try:
+            cameras = conn.execute(
+                """SELECT pm.camera_make, pm.camera_model,
+                          COUNT(*) AS cnt,
+                          MIN(pm.taken_at) AS first_seen,
+                          MAX(pm.taken_at) AS last_seen
+                   FROM photo_meta pm
+                   JOIN files f ON f.id = pm.file_id
+                   WHERE pm.camera_model IS NOT NULL AND f.missing = 0
+                   GROUP BY pm.camera_make, pm.camera_model
+                   ORDER BY cnt DESC"""
+            ).fetchall()
+            return TEMPLATES.TemplateResponse(request, "cameras.html", {
+                "cameras": cameras,
+            })
+        finally:
+            conn.close()
+
+    @app.get("/camera/{camera_model}", response_class=HTMLResponse)
+    async def camera_detail(request: Request, camera_model: str, page: int = Query(0, ge=0)):
+        conn = get_conn()
+        try:
+            per_page = 60
+            offset = page * per_page
+            total = conn.execute(
+                """SELECT COUNT(*) FROM files f
+                   JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE pm.camera_model = ? AND f.missing = 0""",
+                (camera_model,),
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM files f
+                   JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE pm.camera_model = ? AND f.missing = 0
+                   ORDER BY pm.taken_at DESC
+                   LIMIT ? OFFSET ?""",
+                (camera_model, per_page, offset),
+            ).fetchall()
+            has_next = offset + per_page < total
+            return TEMPLATES.TemplateResponse(request, "camera_detail.html", {
+                "camera_model": camera_model,
+                "photos": rows,
+                "page": page,
+                "has_next": has_next,
+                "total": total,
+            })
+        finally:
+            conn.close()
 
     @app.get("/map", response_class=HTMLResponse)
     async def map_page(request: Request):

@@ -70,6 +70,27 @@
     .toggle-bar input[type=checkbox] { accent-color: var(--highlight); }
     .full-link { font-size: 0.8rem; color: #999; margin-left: auto; }
     .full-link:hover { color: var(--highlight); }
+    .photo-nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.5rem;
+    }
+    .photo-nav a {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.4rem 0.8rem;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--fg);
+        text-decoration: none;
+        font-size: 0.85rem;
+        transition: border-color 0.15s;
+    }
+    .photo-nav a:hover { border-color: var(--highlight); color: var(--highlight); }
+    .photo-nav .spacer { flex: 1; }
     .face-list-entry {
         display: flex;
         align-items: center;
@@ -86,6 +107,19 @@
 </style>
 {% endblock %}
 {% block content %}
+<div class="photo-nav">
+    {% if prev_id %}
+    <a href="/photo/{{ prev_id }}">&#8592; Prev</a>
+    {% else %}
+    <span></span>
+    {% endif %}
+    <span class="spacer"></span>
+    {% if next_id %}
+    <a href="/photo/{{ next_id }}">Next &#8594;</a>
+    {% else %}
+    <span></span>
+    {% endif %}
+</div>
 <div class="two-col">
     <div>
         <div class="toggle-bar">
@@ -289,6 +323,18 @@ document.getElementById('toggle-faces')?.addEventListener('change', function() {
         el.classList.toggle('hidden', !this.checked);
     });
     closePopover();
+});
+
+// Keyboard nav: left/right arrow for prev/next
+document.addEventListener('keydown', function(e) {
+    // Don't navigate if user is typing in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    {% if prev_id %}
+    if (e.key === 'ArrowLeft') { window.location.href = '/photo/{{ prev_id }}'; }
+    {% endif %}
+    {% if next_id %}
+    if (e.key === 'ArrowRight') { window.location.href = '/photo/{{ next_id }}'; }
+    {% endif %}
 });
 </script>
 {% endblock %}

@@ -1,11 +1,42 @@
 {% extends "base.html" %}
+{% block head_extra %}
+<style>
+    .year-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-bottom: 0.8rem;
+        align-items: center;
+    }
+    .year-nav a {
+        display: inline-block;
+        padding: 0.25rem 0.6rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        text-decoration: none;
+        color: var(--fg);
+        background: var(--card);
+        border: 1px solid var(--border);
+        transition: background 0.15s;
+    }
+    .year-nav a:hover { background: var(--accent); }
+    .year-nav a.active { background: var(--highlight); border-color: var(--highlight); color: #fff; }
+</style>
+{% endblock %}
 {% block content %}
-<div class="stats-bar">{{ total }} photos</div>
+<div class="stats-bar">{{ total }} photos{% if year %} in {{ year }}{% endif %}</div>
+{% if years %}
+<div class="year-nav">
+    <a href="/" class="{% if not year %}active{% endif %}">All</a>
+    {% for y in years %}
+    <a href="/?year={{ y }}" class="{% if y == year %}active{% endif %}">{{ y }}</a>
+    {% endfor %}
+</div>
+{% endif %}
 <div class="grid" id="photo-grid">
     {% include "_photo_grid.html" %}
 </div>
 <script>
-// Restore scroll position on back-navigation
 if (history.scrollRestoration) history.scrollRestoration = 'auto';
 </script>
 {% endblock %}
