@@ -91,6 +91,22 @@
     }
     .photo-nav a:hover { border-color: var(--highlight); color: var(--highlight); }
     .photo-nav .spacer { flex: 1; }
+    .photo-nav .position {
+        font-size: 0.8rem;
+        color: #888;
+        padding: 0 0.5rem;
+    }
+    .photo-nav .position.in-search {
+        color: var(--highlight);
+    }
+    .jump-link {
+        display: inline-block;
+        margin-left: auto;
+        font-size: 0.8rem;
+        color: #999;
+        text-decoration: none;
+    }
+    .jump-link:hover { color: var(--highlight); }
     .face-list-entry {
         display: flex;
         align-items: center;
@@ -109,13 +125,24 @@
 {% block content %}
 <div class="photo-nav">
     {% if prev_id %}
-    <a href="/photo/{{ prev_id }}">&#8592; Prev</a>
+    <a href="/photo/{{ prev_id }}{{ search_qs }}">&#8592; Prev</a>
     {% else %}
     <span></span>
     {% endif %}
+    {% if in_search and search_position is not none %}
+    <span class="position in-search">
+        {{ search_position + 1 }} / {{ search_total }} in search
+    </span>
+    {% endif %}
     <span class="spacer"></span>
+    {% if timeline_link %}
+    <a href="{{ timeline_link }}" class="jump-link" title="Jump to this photo in the timeline">
+        &#8593; Show in timeline
+    </a>
+    {% endif %}
+    <span style="width:0.8rem;"></span>
     {% if next_id %}
-    <a href="/photo/{{ next_id }}">Next &#8594;</a>
+    <a href="/photo/{{ next_id }}{{ search_qs }}">Next &#8594;</a>
     {% else %}
     <span></span>
     {% endif %}
@@ -366,10 +393,10 @@ document.addEventListener('keydown', function(e) {
     // Don't navigate if user is typing in an input
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     {% if prev_id %}
-    if (e.key === 'ArrowLeft') { window.location.href = '/photo/{{ prev_id }}'; }
+    if (e.key === 'ArrowLeft') { window.location.href = '/photo/{{ prev_id }}{{ search_qs }}'; }
     {% endif %}
     {% if next_id %}
-    if (e.key === 'ArrowRight') { window.location.href = '/photo/{{ next_id }}'; }
+    if (e.key === 'ArrowRight') { window.location.href = '/photo/{{ next_id }}{{ search_qs }}'; }
     {% endif %}
 });
 </script>

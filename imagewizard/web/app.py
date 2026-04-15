@@ -195,7 +195,20 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             conn.close()
 
     @app.get("/photo/{file_id}", response_class=HTMLResponse)
-    async def photo_detail(request: Request, file_id: int):
+    async def photo_detail(
+        request: Request,
+        file_id: int,
+        # When any of these are present, prev/next walk the search result
+        # set instead of the full timeline, so you can page through a
+        # search from the detail view.
+        q: str = Query(""),
+        label: str = Query(""),
+        camera: str = Query(""),
+        person: str = Query(""),
+        cluster: int | None = Query(None),
+        country: str = Query(""),
+        k: int = Query(60, ge=1, le=500),
+    ):
         conn = get_conn()
         try:
             f = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
@@ -213,40 +226,197 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 (file_id,),
             ).fetchall()
 
-            # Prev/next navigation (by date order, same as timeline)
-            taken_at = meta["taken_at"] if meta else None
-            sort_key = taken_at or str(f["mtime"])
+            search_qs = _search_qs(q, label, camera, person, cluster, country, k)
+            in_search = bool(search_qs)
 
-            prev_photo = conn.execute(
-                """SELECT f.id FROM files f
-                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE f.missing = 0
-                     AND COALESCE(pm.taken_at, f.mtime) > ?
-                   ORDER BY COALESCE(pm.taken_at, f.mtime) ASC
-                   LIMIT 1""",
-                (sort_key,),
-            ).fetchone()
+            prev_id: int | None = None
+            next_id: int | None = None
+            search_position: int | None = None
+            search_total: int | None = None
 
-            next_photo = conn.execute(
-                """SELECT f.id FROM files f
-                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE f.missing = 0
-                     AND COALESCE(pm.taken_at, f.mtime) < ?
-                   ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
-                   LIMIT 1""",
-                (sort_key,),
-            ).fetchone()
+            if in_search:
+                # Walk the same list as /search. Result order matters:
+                # CLIP uses distance, others use taken_at DESC.
+                results = _run_search(conn, q, label, camera, person,
+                                      cluster, country, k)
+                ids = [r["id"] for r in results]
+                if file_id in ids:
+                    idx = ids.index(file_id)
+                    search_position = idx
+                    search_total = len(ids)
+                    if idx > 0:
+                        prev_id = ids[idx - 1]
+                    if idx + 1 < len(ids):
+                        next_id = ids[idx + 1]
+            else:
+                # Default: walk the full timeline by taken_at (same order
+                # as /), newer = "prev", older = "next".
+                taken_at = meta["taken_at"] if meta else None
+                sort_key = taken_at or str(f["mtime"])
+
+                prev_photo = conn.execute(
+                    """SELECT f.id FROM files f
+                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                       WHERE f.missing = 0
+                         AND COALESCE(pm.taken_at, f.mtime) > ?
+                       ORDER BY COALESCE(pm.taken_at, f.mtime) ASC
+                       LIMIT 1""",
+                    (sort_key,),
+                ).fetchone()
+                next_photo = conn.execute(
+                    """SELECT f.id FROM files f
+                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                       WHERE f.missing = 0
+                         AND COALESCE(pm.taken_at, f.mtime) < ?
+                       ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+                       LIMIT 1""",
+                    (sort_key,),
+                ).fetchone()
+                prev_id = prev_photo["id"] if prev_photo else None
+                next_id = next_photo["id"] if next_photo else None
+
+            # Jump-to-timeline link: compute the year/month filter this
+            # photo belongs to and which page of the filtered grid it sits
+            # on. Anchor #photo-{id} scrolls the grid to it on load.
+            timeline_link: str | None = None
+            if meta and meta["taken_at"]:
+                ta = meta["taken_at"]
+                tl_year = ta[:4]
+                tl_month = ta[5:7].lstrip("0") or "0"
+                # Count photos newer than this one under the same filter.
+                sort_key = ta
+                where = ("f.missing = 0 AND pm.taken_at LIKE ? "
+                         "AND SUBSTR(pm.taken_at, 6, 2) = ?")
+                newer = conn.execute(
+                    f"""SELECT COUNT(*) FROM files f
+                        LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                        WHERE {where}
+                          AND COALESCE(pm.taken_at, f.mtime) > ?""",
+                    (f"{tl_year}%", ta[5:7], sort_key),
+                ).fetchone()[0]
+                per_page = 60
+                tl_page = newer // per_page
+                page_qs = f"&page={tl_page}" if tl_page else ""
+                timeline_link = (
+                    f"/?year={tl_year}&months={tl_month}{page_qs}"
+                    f"#photo-{file_id}"
+                )
 
             return TEMPLATES.TemplateResponse(request, "photo.html", {
                 "file": f,
                 "meta": meta,
                 "detections": dets,
                 "faces": faces,
-                "prev_id": prev_photo["id"] if prev_photo else None,
-                "next_id": next_photo["id"] if next_photo else None,
+                "prev_id": prev_id,
+                "next_id": next_id,
+                "search_qs": search_qs,
+                "in_search": in_search,
+                "search_position": search_position,
+                "search_total": search_total,
+                "timeline_link": timeline_link,
             })
         finally:
             conn.close()
+
+    def _run_search(conn, q: str, label: str, camera: str, person: str,
+                    cluster: int | None, country: str, k: int) -> list:
+        """Execute the first matching filter and return a list of result rows.
+
+        Used by both the /search page and /photo/{id} (so prev/next on the
+        detail view can walk the same result set).
+        """
+        if q:
+            from ..models.clip import embed_text
+            vec = embed_text(q)
+            vec_bytes = struct.pack(f"{len(vec)}f", *vec.tolist())
+            return conn.execute(
+                """SELECT v.rowid AS id, v.distance, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM vec_clip v
+                   JOIN files f ON f.id = v.rowid
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE v.embedding MATCH ? AND k = ?
+                   ORDER BY v.distance""",
+                (vec_bytes, k),
+            ).fetchall()
+        if label:
+            return conn.execute(
+                """SELECT DISTINCT f.id, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM detections d
+                   JOIN files f ON f.id = d.file_id
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE d.label = ? AND f.missing = 0
+                   ORDER BY pm.taken_at DESC
+                   LIMIT ?""",
+                (label, k),
+            ).fetchall()
+        if person:
+            return conn.execute(
+                """SELECT DISTINCT f.id, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM faces fa
+                   JOIN files f ON f.id = fa.file_id
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE fa.person_name = ? AND f.missing = 0
+                   ORDER BY pm.taken_at DESC
+                   LIMIT ?""",
+                (person, k),
+            ).fetchall()
+        if cluster is not None:
+            return conn.execute(
+                """SELECT DISTINCT f.id, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM faces fa
+                   JOIN files f ON f.id = fa.file_id
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE fa.cluster_id = ? AND f.missing = 0
+                   ORDER BY pm.taken_at DESC
+                   LIMIT ?""",
+                (cluster, k),
+            ).fetchall()
+        if camera:
+            return conn.execute(
+                """SELECT f.id, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM files f
+                   JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE pm.camera_model = ? AND f.missing = 0
+                   ORDER BY pm.taken_at DESC
+                   LIMIT ?""",
+                (camera, k),
+            ).fetchall()
+        if country:
+            return conn.execute(
+                """SELECT f.id, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country
+                   FROM files f
+                   JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE pm.country = ? AND f.missing = 0
+                   ORDER BY pm.taken_at DESC
+                   LIMIT ?""",
+                (country, k),
+            ).fetchall()
+        return []
+
+    def _search_qs(q: str, label: str, camera: str, person: str,
+                   cluster: int | None, country: str, k: int) -> str:
+        """Build a '?q=...&label=...' query-string for threading search
+        filters through photo detail links. Includes the leading '?' so
+        it can be appended directly to a path, or is empty when no filter
+        is active. k is included so the result set size is stable."""
+        from urllib.parse import urlencode
+        parts: list[tuple[str, str]] = []
+        if q: parts.append(("q", q))
+        if label: parts.append(("label", label))
+        if camera: parts.append(("camera", camera))
+        if person: parts.append(("person", person))
+        if cluster is not None: parts.append(("cluster", str(cluster)))
+        if country: parts.append(("country", country))
+        if not parts:
+            return ""
+        parts.append(("k", str(k)))
+        return "?" + urlencode(parts)
 
     @app.get("/search", response_class=HTMLResponse)
     async def search_page(
@@ -261,80 +431,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     ):
         conn = get_conn()
         try:
-            photos = []
-
-            if q:
-                from ..models.clip import embed_text
-                vec = embed_text(q)
-                vec_bytes = struct.pack(f"{len(vec)}f", *vec.tolist())
-                photos = conn.execute(
-                    """SELECT v.rowid AS id, v.distance, f.path, f.content_hash,
-                              pm.taken_at, pm.camera_model, pm.city, pm.country
-                       FROM vec_clip v
-                       JOIN files f ON f.id = v.rowid
-                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE v.embedding MATCH ? AND k = ?
-                       ORDER BY v.distance""",
-                    (vec_bytes, k),
-                ).fetchall()
-            elif label:
-                photos = conn.execute(
-                    """SELECT DISTINCT f.id, f.path, f.content_hash,
-                              pm.taken_at, pm.camera_model, pm.city, pm.country
-                       FROM detections d
-                       JOIN files f ON f.id = d.file_id
-                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE d.label = ? AND f.missing = 0
-                       ORDER BY pm.taken_at DESC
-                       LIMIT ?""",
-                    (label, k),
-                ).fetchall()
-            elif person:
-                photos = conn.execute(
-                    """SELECT DISTINCT f.id, f.path, f.content_hash,
-                              pm.taken_at, pm.camera_model, pm.city, pm.country
-                       FROM faces fa
-                       JOIN files f ON f.id = fa.file_id
-                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE fa.person_name = ? AND f.missing = 0
-                       ORDER BY pm.taken_at DESC
-                       LIMIT ?""",
-                    (person, k),
-                ).fetchall()
-            elif cluster is not None:
-                photos = conn.execute(
-                    """SELECT DISTINCT f.id, f.path, f.content_hash,
-                              pm.taken_at, pm.camera_model, pm.city, pm.country
-                       FROM faces fa
-                       JOIN files f ON f.id = fa.file_id
-                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE fa.cluster_id = ? AND f.missing = 0
-                       ORDER BY pm.taken_at DESC
-                       LIMIT ?""",
-                    (cluster, k),
-                ).fetchall()
-            elif camera:
-                photos = conn.execute(
-                    """SELECT f.id, f.path, f.content_hash,
-                              pm.taken_at, pm.camera_model, pm.city, pm.country
-                       FROM files f
-                       JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE pm.camera_model = ? AND f.missing = 0
-                       ORDER BY pm.taken_at DESC
-                       LIMIT ?""",
-                    (camera, k),
-                ).fetchall()
-            elif country:
-                photos = conn.execute(
-                    """SELECT f.id, f.path, f.content_hash,
-                              pm.taken_at, pm.camera_model, pm.city, pm.country
-                       FROM files f
-                       JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE pm.country = ? AND f.missing = 0
-                       ORDER BY pm.taken_at DESC
-                       LIMIT ?""",
-                    (country, k),
-                ).fetchall()
+            photos = _run_search(conn, q, label, camera, person, cluster, country, k)
 
             # Dropdowns for search form
             labels = [r[0] for r in conn.execute(
@@ -356,28 +453,58 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "person": person, "cluster": cluster, "country": country,
                 "labels": labels, "cameras": cameras,
                 "people": people, "countries": countries,
+                "search_qs": _search_qs(q, label, camera, person, cluster, country, k),
             })
         finally:
             conn.close()
 
+    FACES_PER_PAGE = 48
+
+    def _load_face_clusters(conn, page: int) -> tuple[list, int, bool]:
+        """Return (clusters_on_this_page, total_clusters, has_next)."""
+        offset = page * FACES_PER_PAGE
+        total = conn.execute("SELECT COUNT(*) FROM face_clusters").fetchone()[0]
+        rows = conn.execute(
+            """SELECT fc.cluster_id, fc.person_name, fc.face_count,
+                      (SELECT f.content_hash FROM faces fa
+                       JOIN files f ON f.id = fa.file_id
+                       WHERE fa.cluster_id = fc.cluster_id
+                       ORDER BY fa.det_score DESC LIMIT 1) AS rep_hash,
+                      (SELECT fa.file_id FROM faces fa
+                       WHERE fa.cluster_id = fc.cluster_id
+                       ORDER BY fa.det_score DESC LIMIT 1) AS rep_file_id
+               FROM face_clusters fc
+               ORDER BY fc.face_count DESC
+               LIMIT ? OFFSET ?""",
+            (FACES_PER_PAGE, offset),
+        ).fetchall()
+        has_next = offset + FACES_PER_PAGE < total
+        return rows, total, has_next
+
     @app.get("/faces", response_class=HTMLResponse)
-    async def faces_page(request: Request):
+    async def faces_page(request: Request, page: int = Query(0, ge=0)):
         conn = get_conn()
         try:
-            clusters = conn.execute(
-                """SELECT fc.cluster_id, fc.person_name, fc.face_count,
-                          (SELECT f.content_hash FROM faces fa
-                           JOIN files f ON f.id = fa.file_id
-                           WHERE fa.cluster_id = fc.cluster_id
-                           ORDER BY fa.det_score DESC LIMIT 1) AS rep_hash,
-                          (SELECT fa.file_id FROM faces fa
-                           WHERE fa.cluster_id = fc.cluster_id
-                           ORDER BY fa.det_score DESC LIMIT 1) AS rep_file_id
-                   FROM face_clusters fc
-                   ORDER BY fc.face_count DESC"""
-            ).fetchall()
+            clusters, total, has_next = _load_face_clusters(conn, page)
             return TEMPLATES.TemplateResponse(request, "faces.html", {
                 "clusters": clusters,
+                "total": total,
+                "page": page,
+                "has_next": has_next,
+            })
+        finally:
+            conn.close()
+
+    @app.get("/faces-page", response_class=HTMLResponse)
+    async def faces_page_partial(request: Request, page: int = Query(0, ge=0)):
+        """htmx partial: next page of face cluster cards."""
+        conn = get_conn()
+        try:
+            clusters, _, has_next = _load_face_clusters(conn, page)
+            return TEMPLATES.TemplateResponse(request, "_faces_grid.html", {
+                "clusters": clusters,
+                "page": page,
+                "has_next": has_next,
             })
         finally:
             conn.close()

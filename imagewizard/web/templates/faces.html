@@ -2,26 +2,14 @@
 {% block title_extra %} — Faces{% endblock %}
 {% block content %}
 <h1>Face Clusters</h1>
+<div class="stats-bar">{{ total }} clusters</div>
 {% if clusters %}
-<div class="face-grid">
-    {% for c in clusters %}
-    <div class="face-card">
-        {% if c['rep_hash'] %}
-        <a href="/photo/{{ c['rep_file_id'] }}">
-            <img src="/thumb/{{ c['rep_hash'] }}" alt="Cluster {{ c['cluster_id'] }}">
-        </a>
-        {% endif %}
-        <div style="font-size:0.85rem;margin:0.3rem 0;">
-            {{ c['face_count'] }} photos
-        </div>
-        <form method="post" action="/faces/{{ c['cluster_id'] }}/name">
-            <input type="text" name="name" placeholder="{{ c['person_name'] or 'Name this person' }}"
-                   value="{{ c['person_name'] or '' }}">
-            <button type="submit" style="font-size:0.75rem;padding:0.2rem 0.5rem;">Save</button>
-        </form>
-    </div>
-    {% endfor %}
+<div class="face-grid" id="faces-grid">
+    {% include "_faces_grid.html" %}
 </div>
+<script>
+if (history.scrollRestoration) history.scrollRestoration = 'auto';
+</script>
 {% else %}
 <p style="margin-top:2rem;color:#999;">No face clusters yet. Run <code>image-wizard cluster-faces</code> after indexing.</p>
 {% endif %}

@@ -1,5 +1,5 @@
 {% for p in photos %}
-<a href="/photo/{{ p['id'] }}">
+<a id="photo-{{ p['id'] }}" href="/photo/{{ p['id'] }}">
     <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
          alt="{{ p['taken_at'] or '' }}">
     <span class="caption">

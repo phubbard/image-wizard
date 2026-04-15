@@ -42,7 +42,7 @@
 <div class="stats-bar">{{ photos|length }} results</div>
 <div class="grid">
     {% for p in photos %}
-    <a href="/photo/{{ p['id'] }}">
+    <a href="/photo/{{ p['id'] }}{{ search_qs }}">
         <img src="/thumb/{{ p['content_hash'] }}" loading="lazy" alt="">
         <span class="caption">
             {{ (p['taken_at'] or '')[:10] }}
