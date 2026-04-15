@@ -10,7 +10,13 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps
+
+# Many real-world JPEGs (especially those round-tripped through Synology
+# DiskStation "conflict" copies) have a handful of truncated trailing bytes.
+# Pillow refuses to decode them by default; flipping this flag lets it return
+# whatever it successfully parsed, which is plenty for ML features.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 log = logging.getLogger(__name__)
 
