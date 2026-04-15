@@ -1,5 +1,8 @@
 {% for c in clusters %}
-<div class="face-card">
+<div class="face-card" style="position:relative;">
+    <input type="checkbox" class="merge-check"
+           data-cluster-id="{{ c['cluster_id'] }}"
+           title="Select for merge">
     {% if c['rep_hash'] %}
     <a href="/photo/{{ c['rep_file_id'] }}">
         <img src="/thumb/{{ c['rep_hash'] }}" alt="Cluster {{ c['cluster_id'] }}">

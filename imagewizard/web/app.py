@@ -561,6 +561,61 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             conn.close()
         return RedirectResponse(f"/photo/{file_id}", status_code=303)
 
+    @app.post("/faces/merge")
+    async def merge_clusters(request: Request):
+        """Merge multiple face clusters into one.
+
+        Expects form fields:
+        - cluster_ids: comma-separated list of cluster IDs to merge
+        - name: the person_name to assign to the merged cluster
+
+        The first cluster_id becomes the surviving cluster; all faces in
+        the other clusters are reassigned to it, their face_clusters rows
+        deleted, and the face count updated.
+        """
+        form = await request.form()
+        raw_ids = form.get("cluster_ids", "")
+        name = form.get("name", "").strip()
+
+        try:
+            ids = [int(x.strip()) for x in raw_ids.split(",") if x.strip()]
+        except ValueError:
+            return RedirectResponse("/faces", status_code=303)
+        if len(ids) < 2 or not name:
+            return RedirectResponse("/faces", status_code=303)
+
+        keeper = ids[0]
+        others = ids[1:]
+
+        conn = get_conn()
+        try:
+            # Move all faces from 'others' clusters into 'keeper'
+            for cid in others:
+                conn.execute(
+                    "UPDATE faces SET cluster_id=?, person_name=? WHERE cluster_id=?",
+                    (keeper, name, cid),
+                )
+                conn.execute(
+                    "DELETE FROM face_clusters WHERE cluster_id=?",
+                    (cid,),
+                )
+            # Update keeper
+            conn.execute(
+                "UPDATE faces SET person_name=? WHERE cluster_id=?",
+                (name, keeper),
+            )
+            new_count = conn.execute(
+                "SELECT COUNT(*) FROM faces WHERE cluster_id=?",
+                (keeper,),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE face_clusters SET person_name=?, face_count=? WHERE cluster_id=?",
+                (name, new_count, keeper),
+            )
+        finally:
+            conn.close()
+        return RedirectResponse("/faces", status_code=303)
+
     @app.get("/cameras", response_class=HTMLResponse)
     async def cameras_page(request: Request):
         conn = get_conn()

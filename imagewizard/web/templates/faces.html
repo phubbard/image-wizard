@@ -1,14 +1,124 @@
 {% extends "base.html" %}
 {% block title_extra %} — Faces{% endblock %}
+{% block head_extra %}
+<style>
+    .merge-bar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: none;
+        align-items: center;
+        gap: 0.8rem;
+        padding: 0.6rem 1rem;
+        margin-bottom: 0.8rem;
+        background: var(--card);
+        border: 1px solid #f7b731;
+        border-radius: 6px;
+    }
+    .merge-bar.show { display: flex; }
+    .merge-bar .count { font-weight: 600; min-width: 8rem; }
+    .merge-bar input[type=text] {
+        width: 150px;
+        padding: 0.3rem 0.5rem;
+        font-size: 0.85rem;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+    }
+    .merge-bar button {
+        font-size: 0.8rem;
+        padding: 0.3rem 0.7rem;
+    }
+    .merge-bar .cancel-btn {
+        background: #666;
+        color: #fff;
+    }
+    .face-card.selected {
+        border-color: #f7b731 !important;
+        box-shadow: 0 0 0 2px rgba(247,183,49,0.4);
+    }
+    .face-card .merge-check {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        width: 20px;
+        height: 20px;
+        accent-color: #f7b731;
+        cursor: pointer;
+    }
+</style>
+{% endblock %}
 {% block content %}
 <h1>Face Clusters</h1>
 <div class="stats-bar">{{ total }} clusters</div>
+
+<div class="merge-bar" id="merge-bar">
+    <span class="count" id="merge-count">0 selected</span>
+    <input type="text" id="merge-name" placeholder="Person name for merged cluster">
+    <button id="merge-btn">Merge</button>
+    <button class="cancel-btn" id="merge-cancel">Cancel</button>
+</div>
+
 {% if clusters %}
 <div class="face-grid" id="faces-grid">
     {% include "_faces_grid.html" %}
 </div>
 <script>
 if (history.scrollRestoration) history.scrollRestoration = 'auto';
+
+// --- Merge UI ---
+const selected = new Set();
+const bar = document.getElementById('merge-bar');
+const countEl = document.getElementById('merge-count');
+const nameInput = document.getElementById('merge-name');
+
+function updateBar() {
+    countEl.textContent = selected.size + ' selected';
+    bar.classList.toggle('show', selected.size > 0);
+}
+
+// Delegate checkbox changes to the grid (works with htmx-loaded pages)
+document.getElementById('faces-grid').addEventListener('change', function(e) {
+    if (!e.target.classList.contains('merge-check')) return;
+    const card = e.target.closest('.face-card');
+    const cid = e.target.dataset.clusterId;
+    if (e.target.checked) {
+        selected.add(cid);
+        card.classList.add('selected');
+        // Pre-fill name from the first selected cluster that has one
+        if (!nameInput.value) {
+            const n = card.querySelector('input[name=name]')?.value;
+            if (n) nameInput.value = n;
+        }
+    } else {
+        selected.delete(cid);
+        card.classList.remove('selected');
+    }
+    updateBar();
+});
+
+document.getElementById('merge-cancel').addEventListener('click', function() {
+    selected.clear();
+    document.querySelectorAll('.merge-check').forEach(cb => {
+        cb.checked = false;
+        cb.closest('.face-card')?.classList.remove('selected');
+    });
+    nameInput.value = '';
+    updateBar();
+});
+
+document.getElementById('merge-btn').addEventListener('click', function() {
+    const name = nameInput.value.trim();
+    if (selected.size < 2) { alert('Select at least 2 clusters to merge.'); return; }
+    if (!name) { alert('Enter a person name for the merged cluster.'); return; }
+
+    const form = new FormData();
+    form.append('cluster_ids', Array.from(selected).join(','));
+    form.append('name', name);
+    fetch('/faces/merge', { method: 'POST', body: form })
+        .then(() => window.location.reload());
+});
 </script>
 {% else %}
 <p style="margin-top:2rem;color:#999;">No face clusters yet. Run <code>image-wizard cluster-faces</code> after indexing.</p>

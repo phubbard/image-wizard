@@ -167,6 +167,38 @@ def cluster_faces(
             face_updates,
         )
 
+        # --- Name inheritance ---
+        # For clusters whose face_clusters row has no person_name, check
+        # if the majority of the member faces already carry a user-assigned
+        # name (from a prior run). If so, adopt that name for the cluster.
+        # This handles the "kid ages and HDBSCAN splits the cluster" case:
+        # the user named the faces "Alice" in a prior session, and after
+        # re-clustering the faces keep their name even though the cluster
+        # ID changed.
+        unnamed_clusters = conn.execute(
+            """SELECT cluster_id FROM face_clusters
+               WHERE person_name IS NULL"""
+        ).fetchall()
+        for uc in unnamed_clusters:
+            cid = uc["cluster_id"]
+            # Find the most common non-null person_name among faces in
+            # this cluster.
+            row = conn.execute(
+                """SELECT person_name, COUNT(*) AS cnt
+                   FROM faces
+                   WHERE cluster_id = ? AND person_name IS NOT NULL
+                   GROUP BY person_name
+                   ORDER BY cnt DESC
+                   LIMIT 1""",
+                (cid,),
+            ).fetchone()
+            if row and row["cnt"] >= 2:
+                # At least 2 faces agree on a name — adopt it.
+                conn.execute(
+                    "UPDATE face_clusters SET person_name=? WHERE cluster_id=?",
+                    (row["person_name"], cid),
+                )
+
         # Propagate person_name from face_clusters → faces (batch)
         named = conn.execute(
             "SELECT cluster_id, person_name FROM face_clusters WHERE person_name IS NOT NULL"
