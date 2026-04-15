@@ -353,6 +353,7 @@ def register(parent: typer.Typer) -> None:
                 workers=workers,
                 prefetch_depth=prefetch,
             )
+            db.set_meta(conn, "last_index_at", str(time.time()))
             console = Console()
             for k, v in result.items():
                 console.print(f"  {k}: {v}")

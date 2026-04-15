@@ -105,6 +105,15 @@ def scan(
 
     stats = {"new": 0, "changed": 0, "unchanged": 0, "missing": 0, "errors": 0, "skipped_small": 0}
 
+    # Record the scan roots so the About page can show what's been indexed.
+    now = time.time()
+    for root in roots:
+        rp = str(root.expanduser().resolve())
+        conn.execute(
+            "INSERT OR REPLACE INTO scan_roots (path, last_scanned_at) VALUES (?, ?)",
+            (rp, now),
+        )
+
     paths_seen: set[str] = set()
     files = list(discover(roots, min_pixels=min_pixels))
 

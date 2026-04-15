@@ -206,6 +206,7 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         try:
             result = cluster_faces(conn, min_cluster_size=min_size)
+            db.set_meta(conn, "last_cluster_at", str(time.time()))
             console = Console()
             for k, v in result.items():
                 console.print(f"  {k}: {v}")

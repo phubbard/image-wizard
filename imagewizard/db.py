@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS face_clusters (
 -- Virtual tables for sqlite-vec. Keyed by rowid = files.id / faces.id.
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_clip  USING vec0(embedding float[512]);
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_faces USING vec0(embedding float[512]);
+
+-- Directories that have been passed to `scan`. Used by the About page.
+CREATE TABLE IF NOT EXISTS scan_roots (
+    path            TEXT PRIMARY KEY,
+    last_scanned_at REAL NOT NULL
+);
+
+-- Small key/value table for global timestamps and misc app state
+-- (last_index_at, last_cluster_at, ...). Avoids dedicated one-row tables.
+CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -135,6 +148,19 @@ def init(db_path: Path) -> None:
         )
     finally:
         conn.close()
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Upsert a key/value pair in app_meta."""
+    conn.execute(
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+        (key, value),
+    )
+
+
+def get_meta(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM app_meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
 
 
 @contextmanager

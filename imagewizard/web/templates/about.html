@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title_extra %} — About{% endblock %}
+{% block head_extra %}
+<style>
+    .about-section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1rem;
+    }
+    .about-section h2 {
+        margin-top: 0;
+        font-size: 1rem;
+        color: var(--highlight);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 1rem;
+    }
+    .stat-grid .stat {
+        border-left: 3px solid var(--highlight);
+        padding-left: 0.7rem;
+    }
+    .stat .num { font-size: 1.4rem; font-weight: 600; }
+    .stat .lbl { font-size: 0.75rem; color: #999; text-transform: uppercase; }
+    .root-list { list-style: none; padding: 0; margin: 0; }
+    .root-list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.4rem 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.85rem;
+    }
+    .root-list li:last-child { border-bottom: none; }
+    .root-list .path { word-break: break-all; font-family: ui-monospace, monospace; }
+    .root-list .ts { color: #888; white-space: nowrap; }
+    .about-text p { line-height: 1.55; color: #ccc; }
+    .about-text a { color: var(--highlight); }
+    .db-path {
+        font-family: ui-monospace, monospace;
+        font-size: 0.75rem;
+        color: #888;
+        word-break: break-all;
+    }
+</style>
+{% endblock %}
+{% block content %}
+<h1>About</h1>
+
+<div class="about-section about-text">
+    <h2>image-wizard</h2>
+    <p>
+        A local-first, on-device photo indexer for large personal libraries.
+        Walks your filesystem, records EXIF metadata, runs YOLO for object
+        detection, InsightFace for face detection and clustering, and
+        OpenCLIP for free-text semantic search — all on your own machine,
+        with no cloud calls. Everything is stored in a single SQLite database
+        (vector search included, via sqlite-vec). Browse, search, and label
+        from the built-in web UI.
+    </p>
+    <p>
+        Source:
+        <a href="https://github.com/phubbard/image-wizard" target="_blank"
+           rel="noopener">github.com/phubbard/image-wizard</a>
+    </p>
+</div>
+
+<div class="about-section">
+    <h2>Library</h2>
+    <div class="stat-grid">
+        <div class="stat">
+            <div class="num">{{ "{:,}".format(total_images) }}</div>
+            <div class="lbl">photos indexed</div>
+        </div>
+        <div class="stat">
+            <div class="num">{{ total_bytes_human }}</div>
+            <div class="lbl">image data</div>
+        </div>
+        <div class="stat">
+            <div class="num">{{ "{:,}".format(detections_n) }}</div>
+            <div class="lbl">object detections</div>
+        </div>
+        <div class="stat">
+            <div class="num">{{ "{:,}".format(faces_n) }}</div>
+            <div class="lbl">faces</div>
+        </div>
+        <div class="stat">
+            <div class="num">{{ "{:,}".format(clusters_n) }}</div>
+            <div class="lbl">face clusters</div>
+        </div>
+        <div class="stat">
+            <div class="num">{{ db_size_human }}</div>
+            <div class="lbl">database size</div>
+        </div>
+    </div>
+    <p class="db-path" style="margin-top:0.8rem;">{{ db_path }}</p>
+</div>
+
+<div class="about-section">
+    <h2>Pipeline status</h2>
+    <div class="stat-grid">
+        <div class="stat">
+            <div class="num" style="font-size:1.05rem;">
+                {{ last_index_at or "never" }}
+            </div>
+            <div class="lbl">last index run</div>
+        </div>
+        <div class="stat">
+            <div class="num" style="font-size:1.05rem;">
+                {{ last_cluster_at or "never" }}
+            </div>
+            <div class="lbl">last face clustering</div>
+        </div>
+    </div>
+</div>
+
+<div class="about-section">
+    <h2>Scanned directories ({{ roots|length }})</h2>
+    {% if roots %}
+    <ul class="root-list">
+        {% for r in roots %}
+        <li>
+            <span class="path">{{ r['path'] }}</span>
+            <span class="ts">scanned {{ r['last_scanned'] or '?' }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p style="color:#999;">No directories scanned yet. Run
+        <code>image-wizard scan /path/to/photos</code>.</p>
+    {% endif %}
+</div>
+{% endblock %}

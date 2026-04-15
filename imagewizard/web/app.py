@@ -2,9 +2,30 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 import struct
 from pathlib import Path
+
+
+def _fmt_bytes(n: int) -> str:
+    """1.2 GB / 456 MB / ... for display."""
+    step = 1024.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < step:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} {unit}"
+        n /= step
+    return f"{n:.1f} PB"
+
+
+def _fmt_ts(ts: str | None) -> str | None:
+    """Epoch-string → 'YYYY-MM-DD HH:MM' for display."""
+    if not ts:
+        return None
+    try:
+        return _dt.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return None
 
 import typer
 from fastapi import FastAPI, Query, Request
@@ -494,6 +515,64 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
             return TEMPLATES.TemplateResponse(request, "map.html", {
                 "points": points,
+            })
+        finally:
+            conn.close()
+
+    @app.get("/about", response_class=HTMLResponse)
+    async def about_page(request: Request):
+        conn = get_conn()
+        try:
+            roots = conn.execute(
+                "SELECT path, last_scanned_at FROM scan_roots ORDER BY path"
+            ).fetchall()
+
+            last_index_at = db.get_meta(conn, "last_index_at")
+            last_cluster_at = db.get_meta(conn, "last_cluster_at")
+
+            total_images = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE missing=0"
+            ).fetchone()[0]
+            total_bytes = conn.execute(
+                "SELECT COALESCE(SUM(size), 0) FROM files WHERE missing=0"
+            ).fetchone()[0]
+            detections_n = conn.execute(
+                "SELECT COUNT(*) FROM detections"
+            ).fetchone()[0]
+            faces_n = conn.execute(
+                "SELECT COUNT(*) FROM faces"
+            ).fetchone()[0]
+            clusters_n = conn.execute(
+                "SELECT COUNT(*) FROM face_clusters"
+            ).fetchone()[0]
+
+            db_size = cfg.db_path.stat().st_size if cfg.db_path.exists() else 0
+            # Include WAL + shm if present (they can be sizeable mid-write)
+            for sfx in ("-wal", "-shm"):
+                side = cfg.db_path.with_name(cfg.db_path.name + sfx)
+                if side.exists():
+                    db_size += side.stat().st_size
+
+            # Pre-format rows so the template stays dumb
+            roots_fmt = [
+                {
+                    "path": r["path"],
+                    "last_scanned": _fmt_ts(str(r["last_scanned_at"])),
+                }
+                for r in roots
+            ]
+
+            return TEMPLATES.TemplateResponse(request, "about.html", {
+                "roots": roots_fmt,
+                "last_index_at": _fmt_ts(last_index_at),
+                "last_cluster_at": _fmt_ts(last_cluster_at),
+                "total_images": total_images,
+                "total_bytes_human": _fmt_bytes(total_bytes),
+                "detections_n": detections_n,
+                "faces_n": faces_n,
+                "clusters_n": clusters_n,
+                "db_size_human": _fmt_bytes(db_size),
+                "db_path": str(cfg.db_path),
             })
         finally:
             conn.close()
