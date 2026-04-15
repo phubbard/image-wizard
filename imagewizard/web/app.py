@@ -52,11 +52,51 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
     # ---- Routes ----
 
+    def _parse_months(raw: str) -> list[str]:
+        """'1,3,12' → ['01', '03', '12']. Silently drops junk."""
+        out: list[str] = []
+        for tok in raw.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                n = int(tok)
+            except ValueError:
+                continue
+            if 1 <= n <= 12:
+                out.append(f"{n:02d}")
+        # dedupe, preserve order
+        seen: set[str] = set()
+        result: list[str] = []
+        for m in out:
+            if m not in seen:
+                seen.add(m)
+                result.append(m)
+        return result
+
+    def _build_timeline_where(year: str, months: list[str]) -> tuple[str, list]:
+        where = "f.missing = 0"
+        params: list = []
+        if year:
+            where += " AND pm.taken_at LIKE ?"
+            params.append(f"{year}%")
+        if months:
+            placeholders = ",".join("?" * len(months))
+            where += f" AND SUBSTR(pm.taken_at, 6, 2) IN ({placeholders})"
+            params.extend(months)
+        return where, params
+
     @app.get("/", response_class=HTMLResponse)
-    async def timeline(request: Request, page: int = Query(0, ge=0), year: str = Query("", description="Filter by year")):
+    async def timeline(
+        request: Request,
+        page: int = Query(0, ge=0),
+        year: str = Query("", description="Filter by year"),
+        months: str = Query("", description="Comma-separated months (1-12)"),
+    ):
         conn = get_conn()
         try:
             per_page = 60
+            sel_months = _parse_months(months)
 
             # Available years for nav bar
             years = [r[0] for r in conn.execute(
@@ -65,12 +105,18 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    ORDER BY yr DESC"""
             ).fetchall()]
 
-            # Build WHERE clause
-            where = "f.missing = 0"
-            params: list = []
+            # Months that have photos in the selected year (for the month bar)
+            available_months: list[str] = []
             if year:
-                where += " AND pm.taken_at LIKE ?"
-                params.append(f"{year}%")
+                available_months = [r[0] for r in conn.execute(
+                    """SELECT DISTINCT SUBSTR(taken_at, 6, 2) AS m
+                       FROM photo_meta
+                       WHERE taken_at LIKE ?
+                       ORDER BY m""",
+                    (f"{year}%",),
+                ).fetchall()]
+
+            where, params = _build_timeline_where(year, sel_months)
 
             total = conn.execute(
                 f"""SELECT COUNT(*) FROM files f
@@ -98,23 +144,28 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "total": total,
                 "years": years,
                 "year": year,
+                "available_months": available_months,
+                "selected_months": sel_months,
+                "months_qs": ",".join(sel_months),
             })
         finally:
             conn.close()
 
     @app.get("/timeline-page", response_class=HTMLResponse)
-    async def timeline_page(request: Request, page: int = Query(0, ge=0), year: str = Query("")):
+    async def timeline_page(
+        request: Request,
+        page: int = Query(0, ge=0),
+        year: str = Query(""),
+        months: str = Query(""),
+    ):
         """htmx partial: next page of timeline thumbnails."""
         conn = get_conn()
         try:
             per_page = 60
             offset = page * per_page
+            sel_months = _parse_months(months)
 
-            where = "f.missing = 0"
-            params: list = []
-            if year:
-                where += " AND pm.taken_at LIKE ?"
-                params.append(f"{year}%")
+            where, params = _build_timeline_where(year, sel_months)
 
             rows = conn.execute(
                 f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
@@ -138,6 +189,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
                 "year": year,
+                "months_qs": ",".join(sel_months),
             })
         finally:
             conn.close()

@@ -1,14 +1,22 @@
 {% extends "base.html" %}
 {% block head_extra %}
 <style>
-    .year-nav {
+    .year-nav, .month-nav {
         display: flex;
         flex-wrap: wrap;
         gap: 0.4rem;
         margin-bottom: 0.8rem;
         align-items: center;
     }
-    .year-nav a {
+    .month-nav { margin-top: -0.4rem; }
+    .month-nav .label {
+        font-size: 0.75rem;
+        color: #888;
+        margin-right: 0.3rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .year-nav a, .month-nav a {
         display: inline-block;
         padding: 0.25rem 0.6rem;
         border-radius: 4px;
@@ -19,12 +27,21 @@
         border: 1px solid var(--border);
         transition: background 0.15s;
     }
-    .year-nav a:hover { background: var(--accent); }
-    .year-nav a.active { background: var(--highlight); border-color: var(--highlight); color: #fff; }
+    .year-nav a:hover, .month-nav a:hover { background: var(--accent); }
+    .year-nav a.active, .month-nav a.active {
+        background: var(--highlight);
+        border-color: var(--highlight);
+        color: #fff;
+    }
 </style>
 {% endblock %}
 {% block content %}
-<div class="stats-bar">{{ total }} photos{% if year %} in {{ year }}{% endif %}</div>
+<div class="stats-bar">
+    {{ total }} photos{% if year %} in {{ year }}{% endif %}
+    {% if selected_months %}
+    · {{ selected_months|length }} month{{ 's' if selected_months|length != 1 else '' }}
+    {% endif %}
+</div>
 {% if years %}
 <div class="year-nav">
     <a href="/" class="{% if not year %}active{% endif %}">All</a>
@@ -33,6 +50,31 @@
     {% endfor %}
 </div>
 {% endif %}
+
+{% if year and available_months %}
+{% set month_names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] %}
+<div class="month-nav">
+    <span class="label">Months</span>
+    <a href="/?year={{ year }}" class="{% if not selected_months %}active{% endif %}"
+       title="All months in {{ year }}">All</a>
+    {% for m in available_months %}
+        {% set m_int = m|int %}
+        {% set is_active = m in selected_months %}
+        {# Build the toggled month list: remove if active, add otherwise #}
+        {% if is_active %}
+            {% set new_months = selected_months | reject('equalto', m) | list %}
+        {% else %}
+            {% set new_months = (selected_months + [m]) | sort %}
+        {% endif %}
+        {% set new_qs = new_months | map('int') | join(',') %}
+        <a href="/?year={{ year }}{% if new_qs %}&months={{ new_qs }}{% endif %}"
+           class="{% if is_active %}active{% endif %}">
+            {{ month_names[m_int - 1] }}
+        </a>
+    {% endfor %}
+</div>
+{% endif %}
+
 <div class="grid" id="photo-grid">
     {% include "_photo_grid.html" %}
 </div>

@@ -9,10 +9,11 @@
 </a>
 {% endfor %}
 {% if has_next %}
-<div hx-get="/timeline-page?page={{ page + 1 }}{% if year %}&year={{ year }}{% endif %}"
+{% set qs %}{% if year %}&year={{ year }}{% endif %}{% if months_qs %}&months={{ months_qs }}{% endif %}{% endset %}
+<div hx-get="/timeline-page?page={{ page + 1 }}{{ qs }}"
      hx-trigger="revealed"
      hx-swap="afterend"
-     hx-replace-url="/?page={{ page + 1 }}{% if year %}&year={{ year }}{% endif %}"
+     hx-replace-url="/?page={{ page + 1 }}{{ qs }}"
      style="height:1px;">
 </div>
 {% endif %}
