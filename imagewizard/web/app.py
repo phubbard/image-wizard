@@ -460,7 +460,11 @@ def register(parent: typer.Typer) -> None:
     @parent.command(name="serve")
     def cmd_serve(
         port: int = typer.Option(8765, "--port", "-p", help="Port for the web UI."),
-        host: str = typer.Option("127.0.0.1", "--host"),
+        host: str = typer.Option(
+            "0.0.0.0", "--host",
+            help="Interface to bind. Defaults to all interfaces (0.0.0.0). "
+                 "Use 127.0.0.1 to restrict to localhost.",
+        ),
         reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes."),
     ) -> None:
         """Start the web UI server."""
