@@ -236,6 +236,125 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="find-duplicates")
+    def cmd_find_duplicates(
+        delete: bool = typer.Option(
+            False, "--delete",
+            help="Actually delete redundant files. Default is dry-run.",
+        ),
+        keep: str = typer.Option(
+            "shortest-path", "--keep",
+            help="Which copy to keep per duplicate group: "
+                 "shortest-path | longest-path | oldest | newest.",
+        ),
+        limit: int = typer.Option(
+            0, "--limit",
+            help="Stop after processing this many duplicate groups (0 = all).",
+        ),
+    ) -> None:
+        """Find files with identical SHA-256 content hash and (optionally) delete redundant copies.
+
+        Exact duplicates are grouped by content_hash. In each group one file
+        is chosen as the keeper (by --keep rule); the rest are reported.
+        With --delete, the redundant files are unlinked from disk and their
+        rows removed from the DB. Missing/tombstoned rows are ignored.
+        """
+        if keep not in ("shortest-path", "longest-path", "oldest", "newest"):
+            raise typer.BadParameter(
+                "--keep must be one of: shortest-path, longest-path, oldest, newest"
+            )
+
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            # Find content_hashes that appear more than once on live (missing=0) rows.
+            hashes = conn.execute(
+                """SELECT content_hash, COUNT(*) AS cnt
+                   FROM files
+                   WHERE missing = 0
+                   GROUP BY content_hash
+                   HAVING cnt > 1
+                   ORDER BY cnt DESC"""
+            ).fetchall()
+
+            if not hashes:
+                console.print("[green]no duplicates found[/green]")
+                return
+
+            total_groups = len(hashes)
+            total_dup_files = sum(r["cnt"] - 1 for r in hashes)
+            console.print(
+                f"[yellow]{total_groups} duplicate groups[/yellow] "
+                f"covering {total_dup_files} redundant files"
+            )
+            if not delete:
+                console.print("[dim]dry run — pass --delete to actually remove[/dim]")
+
+            def _picker(rows):
+                if keep == "shortest-path":
+                    return min(rows, key=lambda r: (len(r["path"]), r["path"]))
+                if keep == "longest-path":
+                    return max(rows, key=lambda r: (len(r["path"]), r["path"]))
+                if keep == "oldest":
+                    return min(rows, key=lambda r: r["mtime"])
+                return max(rows, key=lambda r: r["mtime"])  # newest
+
+            removed = 0
+            freed_bytes = 0
+            errors = 0
+
+            for i, h in enumerate(hashes):
+                if limit and i >= limit:
+                    break
+                rows = conn.execute(
+                    """SELECT id, path, size, mtime
+                       FROM files
+                       WHERE content_hash = ? AND missing = 0""",
+                    (h["content_hash"],),
+                ).fetchall()
+                if len(rows) < 2:
+                    continue
+
+                keeper = _picker(rows)
+                losers = [r for r in rows if r["id"] != keeper["id"]]
+
+                console.print(
+                    f"\n[bold]{h['content_hash'][:12]}[/bold] "
+                    f"({len(rows)} copies)"
+                )
+                console.print(f"  [green]keep[/green] {keeper['path']}")
+                for r in losers:
+                    console.print(f"  [red]dup [/red] {r['path']}")
+
+                if delete:
+                    for r in losers:
+                        try:
+                            p = Path(r["path"])
+                            if p.exists():
+                                p.unlink()
+                            # ON DELETE CASCADE cleans detections/faces/vec rows
+                            conn.execute("DELETE FROM files WHERE id=?", (r["id"],))
+                            removed += 1
+                            freed_bytes += r["size"] or 0
+                        except OSError as e:
+                            errors += 1
+                            console.print(f"    [red]error:[/red] {e}")
+                    conn.commit()
+
+            if delete:
+                mb = freed_bytes / (1024 * 1024)
+                console.print(
+                    f"\n[green]removed {removed} files[/green] "
+                    f"(~{mb:.1f} MB), errors: {errors}"
+                )
+            else:
+                console.print(
+                    f"\n[dim]would remove {total_dup_files} files[/dim]"
+                )
+        finally:
+            conn.close()
+
     @parent.command(name="drop-videos")
     def cmd_drop_videos() -> None:
         """Remove video files (.mov, .mp4, ...) that earlier scans indexed.
