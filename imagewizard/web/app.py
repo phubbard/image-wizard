@@ -744,8 +744,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                           pm.taken_at
                    FROM photo_meta pm
                    JOIN files f ON f.id = pm.file_id
-                   WHERE pm.lat IS NOT NULL AND pm.lon IS NOT NULL AND f.missing = 0
-                   LIMIT 5000"""
+                   WHERE pm.lat IS NOT NULL AND pm.lon IS NOT NULL AND f.missing = 0"""
             ).fetchall()
             return TEMPLATES.TemplateResponse(request, "map.html", {
                 "points": points,
