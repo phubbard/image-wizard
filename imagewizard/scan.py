@@ -32,6 +32,10 @@ IMAGE_EXTS = frozenset({
     ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".raf", ".pef",
 })
 
+RAW_EXTS = frozenset({
+    ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".raf", ".pef",
+})
+
 VIDEO_EXTS = frozenset({".mov", ".mp4", ".avi", ".mkv", ".m4v"})
 
 # Videos are recognized so we can skip them cleanly, but they are NOT indexed:
@@ -60,8 +64,7 @@ def _is_too_small(path: Path, min_pixels: int) -> bool:
         return False
     ext = path.suffix.lower()
     # Skip dimension check for RAW and video — they're never thumbnails
-    if ext in VIDEO_EXTS or ext in {".cr2", ".cr3", ".nef", ".arw", ".dng",
-                                     ".orf", ".rw2", ".raf", ".pef"}:
+    if ext in VIDEO_EXTS or ext in RAW_EXTS:
         return False
     try:
         from PIL import Image
@@ -442,6 +445,111 @@ def register(parent: typer.Typer) -> None:
             conn.execute(f"DELETE FROM files WHERE {like}", params)
             conn.commit()
             Console().print(f"  dropped: {n} video rows")
+        finally:
+            conn.close()
+
+    @parent.command(name="fix-orientations")
+    def cmd_fix_orientations(
+        workers: int = typer.Option(4, "--workers", "-w", help="Threads for reading image headers."),
+    ) -> None:
+        """Reset ML flags for files whose stored dimensions don't match the EXIF-rotated image.
+
+        Files indexed before the EXIF orientation fix have bounding boxes
+        (faces, YOLO detections, CLIP vectors) computed from the un-rotated
+        image. This command opens each file's header, compares the
+        exif-transposed dimensions against what's stored, and resets
+        yolo_done/faces_done/clip_done for any mismatches. Then re-run
+        `image-wizard index` to recompute ML features with correct orientation.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from PIL import Image, ImageOps
+
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console(stderr=True)
+
+        try:
+            rows = conn.execute(
+                "SELECT id, path, width, height FROM files WHERE missing=0 AND width > 0 AND height > 0"
+            ).fetchall()
+            console.print(f"[dim]checking {len(rows)} files for orientation mismatch...[/dim]")
+
+            def check_one(row):
+                """Return (file_id, needs_reset) by comparing stored vs actual rotated dims."""
+                try:
+                    p = Path(row["path"])
+                    if not p.exists():
+                        return (row["id"], False)
+                    ext = p.suffix.lower()
+                    # RAW formats don't have EXIF orientation issues
+                    if ext in RAW_EXTS:
+                        return (row["id"], False)
+                    if ext in {".heic", ".heif"}:
+                        try:
+                            import pillow_heif
+                            pillow_heif.register_heif_opener()
+                        except ImportError:
+                            pass
+                    with Image.open(p) as img:
+                        img = ImageOps.exif_transpose(img)
+                        actual_w, actual_h = img.size
+                    # If stored dimensions disagree, the ML work used the wrong orientation
+                    if actual_w != row["width"] or actual_h != row["height"]:
+                        return (row["id"], True)
+                    return (row["id"], False)
+                except Exception:
+                    return (row["id"], False)
+
+            reset_count = 0
+            error_count = 0
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                console=console,
+            ) as prog:
+                task = prog.add_task("checking", total=len(rows))
+                ids_to_reset: list[int] = []
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futs = {pool.submit(check_one, r): r for r in rows}
+                    for fut in as_completed(futs):
+                        prog.advance(task)
+                        fid, needs = fut.result()
+                        if needs:
+                            ids_to_reset.append(fid)
+
+            if ids_to_reset:
+                # Also delete stale detections and faces so they don't pile up
+                for fid in ids_to_reset:
+                    conn.execute("DELETE FROM detections WHERE file_id=?", (fid,))
+                    # Delete face vectors first, then faces
+                    face_ids = [r[0] for r in conn.execute(
+                        "SELECT id FROM faces WHERE file_id=?", (fid,)
+                    ).fetchall()]
+                    for face_id in face_ids:
+                        conn.execute("DELETE FROM vec_faces WHERE rowid=?", (face_id,))
+                    conn.execute("DELETE FROM faces WHERE file_id=?", (fid,))
+                    conn.execute("DELETE FROM vec_clip WHERE rowid=?", (fid,))
+                    conn.execute(
+                        """UPDATE files
+                           SET yolo_done=0, faces_done=0, clip_done=0,
+                               width=0, height=0
+                           WHERE id=?""",
+                        (fid,),
+                    )
+                conn.commit()
+                reset_count = len(ids_to_reset)
+
+            Console().print(
+                f"  reset: {reset_count} files with orientation mismatch"
+            )
+            if reset_count:
+                Console().print(
+                    "[dim]run `image-wizard index` to recompute ML features[/dim]"
+                )
         finally:
             conn.close()
 
