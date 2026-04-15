@@ -159,7 +159,16 @@ def index_files(
 
     if meta_needed:
         console.print(f"[dim]extracting metadata for {len(meta_needed)} files...[/dim]")
-        with ExifTool() as et:
+        with ExifTool() as et, Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as meta_prog:
+            meta_task = meta_prog.add_task("metadata", total=len(meta_needed))
             for i in range(0, len(meta_needed), META_BATCH):
                 batch = meta_needed[i:i + META_BATCH]
                 paths = [Path(r["path"]) for r in batch]
@@ -171,10 +180,11 @@ def index_files(
                         if place:
                             city, region, country = place.city, place.region, place.country
                     meta_map[r["id"]] = (meta, city, region, country)
-
-            # Write metadata to DB now (before ML)
-            for fid, (meta, city, region, country) in meta_map.items():
-                store_metadata(conn, fid, meta, city, region, country)
+                    # Write per-file so a Ctrl-C mid-phase doesn't throw away
+                    # hours of exiftool work.
+                    store_metadata(conn, r["id"], meta, city, region, country)
+                conn.commit()
+                meta_prog.advance(meta_task, len(batch))
         console.print(f"[green]metadata done[/green] ({len(meta_map)} files)")
 
     # --- Phase 2: pre-warm ML models ---
