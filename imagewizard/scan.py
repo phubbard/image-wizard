@@ -34,7 +34,10 @@ IMAGE_EXTS = frozenset({
 
 VIDEO_EXTS = frozenset({".mov", ".mp4", ".avi", ".mkv", ".m4v"})
 
-SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
+# Videos are recognized so we can skip them cleanly, but they are NOT indexed:
+# the ML pipeline can't decode them, so letting them through just produces
+# "cannot identify image file" warnings for every .MOV sibling of a JPG.
+SUPPORTED_EXTS = IMAGE_EXTS
 
 CHUNK = 1 << 16  # 64 KB hash chunks
 
@@ -230,6 +233,28 @@ def register(parent: typer.Typer) -> None:
                     conn.execute("DELETE FROM files WHERE id=?", (r["id"],))
                     dropped += 1
             Console().print(f"  dropped: {dropped} small images (< {min_pixels}px)")
+        finally:
+            conn.close()
+
+    @parent.command(name="drop-videos")
+    def cmd_drop_videos() -> None:
+        """Remove video files (.mov, .mp4, ...) that earlier scans indexed.
+
+        Videos are no longer scanned, but rows from prior runs need a cleanup
+        pass. This deletes them outright — ON DELETE CASCADE clears detections,
+        faces, and vector rows too.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        try:
+            like = " OR ".join(["LOWER(path) LIKE ?"] * len(VIDEO_EXTS))
+            params = [f"%{e}" for e in VIDEO_EXTS]
+            n = conn.execute(
+                f"SELECT COUNT(*) FROM files WHERE {like}", params
+            ).fetchone()[0]
+            conn.execute(f"DELETE FROM files WHERE {like}", params)
+            conn.commit()
+            Console().print(f"  dropped: {n} video rows")
         finally:
             conn.close()
 
