@@ -629,6 +629,20 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    # Browsers (especially iOS Safari) hit these root paths regardless of
+    # any <link rel="icon"> tag. Serve them directly from /static so we
+    # don't return 404s for every page load from a fresh client.
+    @app.get("/favicon.ico")
+    async def serve_favicon():
+        return FileResponse(WEB_DIR / "static" / "favicon.ico",
+                            media_type="image/x-icon")
+
+    @app.get("/apple-touch-icon.png")
+    @app.get("/apple-touch-icon-precomposed.png")
+    async def serve_apple_touch_icon():
+        return FileResponse(WEB_DIR / "static" / "apple-touch-icon.png",
+                            media_type="image/png")
+
     @app.get("/thumb/{content_hash}")
     async def serve_thumb(content_hash: str):
         p = thumb_path(cfg.cache_dir, content_hash)
