@@ -6,6 +6,8 @@ out of this file — it exists only to parse arguments and print results.
 
 from __future__ import annotations
 
+import faulthandler
+import sys
 from pathlib import Path
 
 import typer
@@ -13,6 +15,12 @@ from rich.console import Console
 from rich.table import Table
 
 from . import config, db
+
+# Dump a Python stack trace on native crashes (SIGSEGV, SIGABRT, etc).
+# Without this, a segfault in pillow-heif / onnxruntime / MPS drops the
+# process with zero diagnostics. With it, we get the Python frame that
+# was executing at crash time.
+faulthandler.enable(file=sys.stderr, all_threads=True)
 
 app = typer.Typer(
     name="image-wizard",
