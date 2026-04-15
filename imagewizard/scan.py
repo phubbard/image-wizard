@@ -99,11 +99,23 @@ def scan(
     conn: "db.sqlite3.Connection",
     prune: bool = False,
     min_pixels: int = MIN_PIXELS_DEFAULT,
+    dedupe: bool = True,
 ) -> dict[str, int]:
-    """Walk *roots*, insert/update `files`, return summary counts."""
+    """Walk *roots*, insert/update `files`, return summary counts.
+
+    When *dedupe* is True (the default), a newly-discovered file whose
+    sha256 matches an already-indexed live row is skipped entirely — no
+    new row, no ML rework. If the matching row is tombstoned (missing=1),
+    the existing row is re-pointed at the new path and un-tombstoned, so a
+    moved file keeps all its prior ML work.
+    """
     import sqlite3
 
-    stats = {"new": 0, "changed": 0, "unchanged": 0, "missing": 0, "errors": 0, "skipped_small": 0}
+    stats = {
+        "new": 0, "changed": 0, "unchanged": 0, "missing": 0,
+        "errors": 0, "skipped_small": 0,
+        "dedup_skipped": 0, "moved": 0,
+    }
 
     # Record the scan roots so the About page can show what's been indexed.
     now = time.time()
@@ -166,12 +178,52 @@ def scan(
                 )
                 stats["changed"] += 1
             else:
-                # new file
+                # new file (no row by path)
                 try:
                     chash = content_hash(path)
                 except OSError:
                     stats["errors"] += 1
                     continue
+
+                # Hash dedupe: if these bytes are already indexed elsewhere,
+                # avoid redoing ML. Prefer a live row (true duplicate) before
+                # considering a tombstoned row (moved file).
+                if dedupe:
+                    live = conn.execute(
+                        """SELECT id, path FROM files
+                           WHERE content_hash = ? AND missing = 0
+                           LIMIT 1""",
+                        (chash,),
+                    ).fetchone()
+                    if live is not None:
+                        # Already indexed at another path — skip outright.
+                        # Count its path as "seen" so --prune doesn't mark
+                        # the canonical copy as missing.
+                        paths_seen.add(live["path"])
+                        stats["dedup_skipped"] += 1
+                        continue
+
+                    dead = conn.execute(
+                        """SELECT id FROM files
+                           WHERE content_hash = ? AND missing = 1
+                           LIMIT 1""",
+                        (chash,),
+                    ).fetchone()
+                    if dead is not None:
+                        # File moved: reuse the existing row so prior ML
+                        # work (detections, faces, CLIP vector) is kept.
+                        mime = mimetypes.guess_type(spath)[0]
+                        conn.execute(
+                            """UPDATE files
+                               SET path=?, size=?, mtime=?, mime=?,
+                                   missing=0, indexed_at=?
+                               WHERE id=?""",
+                            (spath, st.st_size, st.st_mtime, mime,
+                             time.time(), dead["id"]),
+                        )
+                        stats["moved"] += 1
+                        continue
+
                 mime = mimetypes.guess_type(spath)[0]
                 conn.execute(
                     """INSERT INTO files (path, content_hash, size, mtime, mime, indexed_at)
@@ -209,13 +261,20 @@ def register(parent: typer.Typer) -> None:
             MIN_PIXELS_DEFAULT, "--min-pixels",
             help="Skip images where BOTH dimensions are below this (0 to disable).",
         ),
+        dedupe: bool = typer.Option(
+            True, "--dedupe/--no-dedupe",
+            help="Skip byte-identical duplicates of already-indexed files. "
+                 "Moved files (same hash, old row tombstoned) are re-pointed "
+                 "at the new path so prior ML work is preserved.",
+        ),
     ) -> None:
         """Scan directories for images/videos and populate the file index."""
         cfg = config.load()
         db.init(cfg.db_path)
         conn = db.connect(cfg.db_path)
         try:
-            result = scan(paths, conn, prune=prune, min_pixels=min_pixels)
+            result = scan(paths, conn, prune=prune,
+                          min_pixels=min_pixels, dedupe=dedupe)
             console = Console()
             for k, v in result.items():
                 console.print(f"  {k}: {v}")
