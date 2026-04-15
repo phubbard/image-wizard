@@ -124,10 +124,10 @@
     <div>
         <div class="toggle-bar">
             {% if detections %}
-            <label><input type="checkbox" id="toggle-objects" checked> Objects</label>
+            <label><input type="checkbox" id="toggle-objects"> Objects</label>
             {% endif %}
             {% if faces %}
-            <label><input type="checkbox" id="toggle-faces" checked> Faces</label>
+            <label><input type="checkbox" id="toggle-faces"> Faces</label>
             {% endif %}
             <a href="/full/{{ file['id'] }}" target="_blank" class="full-link">View full image</a>
         </div>
@@ -136,7 +136,7 @@
                  onload="placeBboxes()">
 
             {% for d in detections %}
-            <div class="bbox det" data-type="det"
+            <div class="bbox det hidden" data-type="det"
                  data-x="{{ d['x'] }}" data-y="{{ d['y'] }}"
                  data-w="{{ d['w'] }}" data-h="{{ d['h'] }}">
                 <span class="bbox-label">{{ d['label'] }} {{ "%.0f"|format(d['conf']*100) }}%</span>
@@ -144,7 +144,7 @@
             {% endfor %}
 
             {% for f in faces %}
-            <div class="bbox face" data-type="face"
+            <div class="bbox face hidden" data-type="face"
                  data-face-id="{{ f['id'] }}"
                  data-face-name="{{ f['person_name'] or '' }}"
                  data-x="{{ f['x'] }}" data-y="{{ f['y'] }}"
@@ -167,7 +167,18 @@
             {% if meta['shutter'] %}<tr><td>Shutter</td><td>{{ meta['shutter'] }}s</td></tr>{% endif %}
             {% if meta['focal_mm'] %}<tr><td>Focal</td><td>{{ meta['focal_mm'] }}mm</td></tr>{% endif %}
             {% if meta['city'] %}<tr><td>Location</td><td>{{ meta['city'] }}, {{ meta['country'] }}</td></tr>{% endif %}
-            {% if meta['lat'] %}<tr><td>GPS</td><td>{{ "%.5f"|format(meta['lat']) }}, {{ "%.5f"|format(meta['lon']) }}</td></tr>{% endif %}
+            {% if meta['lat'] %}
+            <tr>
+                <td>GPS</td>
+                <td>
+                    <a href="#" class="nearby-link"
+                       data-lat="{{ meta['lat'] }}" data-lon="{{ meta['lon'] }}"
+                       title="Find photos near this location">
+                        {{ "%.5f"|format(meta['lat']) }}, {{ "%.5f"|format(meta['lon']) }}
+                    </a>
+                </td>
+            </tr>
+            {% endif %}
             {% endif %}
             <tr><td>Size</td><td>{{ file['width'] }}×{{ file['height'] }}</td></tr>
             <tr><td>File</td><td style="word-break:break-all;font-size:0.75rem;">{{ file['path'] }}</td></tr>
@@ -177,7 +188,10 @@
         <h3 style="margin-top:1rem;">Objects ({{ detections|length }})</h3>
         <div>
             {% for d in detections %}
-            <span class="pill">{{ d['label'] }} {{ "%.0f"|format(d['conf']*100) }}%</span>
+            <a class="pill" href="/search?label={{ d['label']|urlencode }}"
+               title="Find more photos with {{ d['label'] }}">
+                {{ d['label'] }} {{ "%.0f"|format(d['conf']*100) }}%
+            </a>
             {% endfor %}
         </div>
         {% endif %}
@@ -187,7 +201,15 @@
         {% for f in faces %}
         <div class="face-list-entry" data-sidebar-face="{{ f['id'] }}">
             <span class="dot"></span>
-            <span>{{ f['person_name'] or 'Unnamed' }}</span>
+            {% if f['person_name'] %}
+            <a href="/search?person={{ f['person_name']|urlencode }}"
+               title="Find more photos of {{ f['person_name'] }}">{{ f['person_name'] }}</a>
+            {% elif f['cluster_id'] %}
+            <a href="/search?cluster={{ f['cluster_id'] }}"
+               title="Find more photos in this cluster">Unnamed</a>
+            {% else %}
+            <span>Unnamed</span>
+            {% endif %}
             <span style="color:#666;font-size:0.75rem;">
                 {{ "%.0f"|format(f['det_score']*100) }}%
                 {% if f['cluster_id'] %} · cluster #{{ f['cluster_id'] }}{% endif %}
@@ -323,6 +345,20 @@ document.getElementById('toggle-faces')?.addEventListener('change', function() {
         el.classList.toggle('hidden', !this.checked);
     });
     closePopover();
+});
+
+// GPS row → prompt for radius, then jump to /nearby
+document.querySelectorAll('.nearby-link').forEach(link => {
+    link.addEventListener('click', function(e) {
+        e.preventDefault();
+        const lat = this.dataset.lat;
+        const lon = this.dataset.lon;
+        const raw = prompt('Search radius in km:', '5');
+        if (raw === null) return;
+        const r = parseFloat(raw);
+        if (!isFinite(r) || r <= 0) return;
+        window.location.href = `/nearby?lat=${lat}&lon=${lon}&radius_km=${r}`;
+    });
 });
 
 // Keyboard nav: left/right arrow for prev/next

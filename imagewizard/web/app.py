@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 from pathlib import Path
 
@@ -181,6 +182,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         label: str = Query("", description="YOLO label filter"),
         camera: str = Query("", description="Camera model filter"),
         person: str = Query("", description="Person name filter"),
+        cluster: int | None = Query(None, description="Unnamed face cluster id"),
         country: str = Query("", description="Country filter"),
         k: int = Query(60, ge=1, le=500),
     ):
@@ -226,6 +228,18 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                        LIMIT ?""",
                     (person, k),
                 ).fetchall()
+            elif cluster is not None:
+                photos = conn.execute(
+                    """SELECT DISTINCT f.id, f.path, f.content_hash,
+                              pm.taken_at, pm.camera_model, pm.city, pm.country
+                       FROM faces fa
+                       JOIN files f ON f.id = fa.file_id
+                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                       WHERE fa.cluster_id = ? AND f.missing = 0
+                       ORDER BY pm.taken_at DESC
+                       LIMIT ?""",
+                    (cluster, k),
+                ).fetchall()
             elif camera:
                 photos = conn.execute(
                     """SELECT f.id, f.path, f.content_hash,
@@ -266,7 +280,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return TEMPLATES.TemplateResponse(request, "search.html", {
                 "photos": photos,
                 "q": q, "label": label, "camera": camera,
-                "person": person, "country": country,
+                "person": person, "cluster": cluster, "country": country,
                 "labels": labels, "cameras": cameras,
                 "people": people, "countries": countries,
             })
@@ -397,6 +411,71 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
                 "total": total,
+            })
+        finally:
+            conn.close()
+
+    @app.get("/nearby", response_class=HTMLResponse)
+    async def nearby_page(
+        request: Request,
+        lat: float = Query(..., description="Center latitude"),
+        lon: float = Query(..., description="Center longitude"),
+        radius_km: float = Query(5.0, gt=0, le=20000, description="Search radius in km"),
+        page: int = Query(0, ge=0),
+    ):
+        """Photos within *radius_km* of (lat, lon), nearest first."""
+        conn = get_conn()
+        try:
+            per_page = 60
+            # Bounding-box pre-filter so the index is used; haversine refines.
+            # 1 deg lat ≈ 111.32 km; 1 deg lon ≈ 111.32*cos(lat) km.
+            dlat = radius_km / 111.32
+            dlon = radius_km / (111.32 * max(math.cos(math.radians(lat)), 1e-6))
+            lat_min, lat_max = lat - dlat, lat + dlat
+            lon_min, lon_max = lon - dlon, lon + dlon
+
+            rows = conn.execute(
+                """SELECT f.id, f.path, f.content_hash,
+                          pm.taken_at, pm.camera_model, pm.city, pm.country,
+                          pm.lat, pm.lon
+                   FROM photo_meta pm
+                   JOIN files f ON f.id = pm.file_id
+                   WHERE pm.lat BETWEEN ? AND ?
+                     AND pm.lon BETWEEN ? AND ?
+                     AND f.missing = 0""",
+                (lat_min, lat_max, lon_min, lon_max),
+            ).fetchall()
+
+            # Exact haversine; filter + sort in Python (small result set).
+            R = 6371.0  # km
+            lat_r = math.radians(lat)
+            lon_r = math.radians(lon)
+            scored: list[tuple[float, dict]] = []
+            for r in rows:
+                plat_r = math.radians(r["lat"])
+                plon_r = math.radians(r["lon"])
+                dph = plat_r - lat_r
+                dlh = plon_r - lon_r
+                a = math.sin(dph / 2) ** 2 + math.cos(lat_r) * math.cos(plat_r) * math.sin(dlh / 2) ** 2
+                dist = 2 * R * math.asin(min(1.0, math.sqrt(a)))
+                if dist <= radius_km:
+                    scored.append((dist, dict(r)))
+            scored.sort(key=lambda x: x[0])
+
+            total = len(scored)
+            offset = page * per_page
+            window = scored[offset:offset + per_page]
+            photos = [dict(d, distance_km=dist) for dist, d in window]
+            has_next = offset + per_page < total
+
+            return TEMPLATES.TemplateResponse(request, "nearby.html", {
+                "photos": photos,
+                "lat": lat,
+                "lon": lon,
+                "radius_km": radius_km,
+                "total": total,
+                "page": page,
+                "has_next": has_next,
             })
         finally:
             conn.close()

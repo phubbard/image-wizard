@@ -74,11 +74,15 @@
         .pill {
             display: inline-block;
             background: var(--accent);
+            color: var(--fg);
+            text-decoration: none;
             padding: 2px 8px;
             border-radius: 12px;
             font-size: 0.8rem;
             margin: 2px;
+            transition: background 0.15s;
         }
+        a.pill:hover { background: var(--highlight); color: #fff; }
         form label { display: block; margin-top: 0.5rem; font-size: 0.85rem; }
         input, select {
             background: var(--card);

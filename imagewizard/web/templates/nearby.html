@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title_extra %} — Nearby{% endblock %}
+{% block head_extra %}
+<style>
+    .nearby-header {
+        margin-bottom: 0.8rem;
+        color: #aaa;
+        font-size: 0.9rem;
+    }
+    .nearby-header strong { color: var(--fg); }
+    .grid a .caption small { color: #888; }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Photos near ({{ "%.5f"|format(lat) }}, {{ "%.5f"|format(lon) }})</h1>
+<div class="nearby-header">
+    within <strong>{{ radius_km }} km</strong> · {{ total }} photos
+</div>
+{% if photos %}
+<div class="grid">
+    {% for p in photos %}
+    <a href="/photo/{{ p['id'] }}">
+        <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
+             alt="{{ p['taken_at'] or '' }}">
+        <span class="caption">
+            {{ (p['taken_at'] or '')[:10] }}
+            {% if p['city'] %} · {{ p['city'] }}{% endif %}
+            <br><small>{{ "%.2f"|format(p['distance_km']) }} km</small>
+        </span>
+    </a>
+    {% endfor %}
+</div>
+{% if page > 0 or has_next %}
+<div style="display:flex;gap:1rem;justify-content:center;margin-top:1rem;">
+    {% if page > 0 %}
+    <a href="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page - 1 }}" class="btn">Previous</a>
+    {% endif %}
+    <span style="color:#999;align-self:center;">Page {{ page + 1 }}</span>
+    {% if has_next %}
+    <a href="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page + 1 }}" class="btn">Next</a>
+    {% endif %}
+</div>
+{% endif %}
+{% else %}
+<p style="color:#999;margin-top:2rem;">No photos within {{ radius_km }} km.</p>
+{% endif %}
+{% endblock %}
