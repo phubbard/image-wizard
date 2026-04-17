@@ -876,6 +876,61 @@ def register(parent: typer.Typer) -> None:
         import uvicorn
         cfg = config.load()
         db.init(cfg.db_path)
+
+        # Detailed log config: timestamps on every line, and filter out the
+        # context-free "Invalid HTTP request received" warnings that come from
+        # bots / TLS-on-HTTP probes (they carry no useful info since the
+        # request was unparseable).
+        log_config: dict = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s %(levelprefix)s %(message)s",
+                    "datefmt": "%Y-%m-%d %H:%M:%S",
+                    "()": "uvicorn.logging.DefaultFormatter",
+                },
+                "access": {
+                    "format": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+                    "datefmt": "%Y-%m-%d %H:%M:%S",
+                    "()": "uvicorn.logging.AccessFormatter",
+                },
+            },
+            "filters": {
+                "no_invalid_http": {
+                    "()": "imagewizard.web.log_filter.InvalidHTTPFilter",
+                },
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stderr",
+                },
+                "access": {
+                    "formatter": "access",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+            },
+            "loggers": {
+                "uvicorn": {
+                    "handlers": ["default"],
+                    "level": "INFO",
+                    "propagate": False,
+                },
+                "uvicorn.error": {
+                    "level": "INFO",
+                    "filters": ["no_invalid_http"],
+                },
+                "uvicorn.access": {
+                    "handlers": ["access"],
+                    "level": "INFO",
+                    "propagate": False,
+                },
+            },
+        }
+
         if reload:
             # uvicorn reload needs an import string, not an app object
             import os
@@ -888,7 +943,8 @@ def register(parent: typer.Typer) -> None:
                 port=port,
                 reload=True,
                 reload_dirs=[str(Path(__file__).parent.parent)],
+                log_config=log_config,
             )
         else:
             app = create_app(cfg)
-            uvicorn.run(app, host=host, port=port)
+            uvicorn.run(app, host=host, port=port, log_config=log_config)
