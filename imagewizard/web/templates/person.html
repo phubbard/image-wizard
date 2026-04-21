@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title_extra %} — {{ person }}{% endblock %}
+
+{% block content %}
+<h1>{{ person }}</h1>
+
+<div class="stats-bar">
+    {{ stats['n_photos'] }} photos
+    · {{ stats['n_faces'] }} face appearances
+    {% if stats['n_clusters'] and stats['n_clusters'] > 1 %}
+        · {{ stats['n_clusters'] }} clusters merged
+    {% endif %}
+    {% if stats['first_date'] and stats['last_date'] %}
+        · {{ stats['first_date'][:10] }} → {{ stats['last_date'][:10] }}
+    {% endif %}
+</div>
+
+{% if year_faces %}
+<h2 style="margin-top:1rem;">Through the years</h2>
+<div style="display:flex;gap:0.5rem;overflow-x:auto;padding:0.5rem 0 1rem;">
+    {% for yf in year_faces %}
+    <a href="/photo/{{ yf['file_id'] }}"
+       style="flex:0 0 auto;text-align:center;text-decoration:none;color:var(--fg);">
+        <img src="/thumb/{{ yf['content_hash'] }}" loading="lazy"
+             alt="{{ yf['yr'] }}"
+             style="width:110px;height:110px;object-fit:cover;border-radius:6px;display:block;">
+        <div style="font-size:0.8rem;margin-top:0.25rem;">{{ yf['yr'] }}</div>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+<h2>All photos</h2>
+<div class="grid">
+    {% include "_person_photo_grid.html" %}
+</div>
+{% endblock %}

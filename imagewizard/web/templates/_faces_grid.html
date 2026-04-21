@@ -9,7 +9,14 @@
     </a>
     {% endif %}
     <div style="font-size:0.85rem;margin:0.3rem 0;">
+        {% if c['person_name'] %}
+        <a href="/person/{{ c['person_name']|urlencode }}"
+           title="Open {{ c['person_name'] }}'s timeline">
+            {{ c['face_count'] }} photos →
+        </a>
+        {% else %}
         {{ c['face_count'] }} photos
+        {% endif %}
     </div>
     <form method="post" action="/faces/{{ c['cluster_id'] }}/name">
         <input type="text" name="name" placeholder="{{ c['person_name'] or 'Name this person' }}"

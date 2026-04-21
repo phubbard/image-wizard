@@ -194,6 +194,140 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    # ------------------------------------------------------------------
+    # Per-person timeline
+    # ------------------------------------------------------------------
+    # /person/{name}     — full page: stats + "through the years" face
+    #                      strip + paginated photo grid
+    # /person-page/{name} — htmx partial for infinite-scroll pagination
+    #
+    # "name" is URL-encoded. We aggregate across every cluster that has
+    # been named the same thing, so the multi-cluster-same-person case
+    # (kids aging, HDBSCAN splits) shows as a single person.
+
+    PERSON_PER_PAGE = 60
+
+    def _person_photos(conn, person: str, limit: int, offset: int):
+        return conn.execute(
+            """SELECT f.id, f.path, f.content_hash,
+                      pm.taken_at, pm.camera_model, pm.city, pm.country
+               FROM (
+                   SELECT DISTINCT fa.file_id AS fid
+                   FROM faces fa
+                   JOIN files ff ON ff.id = fa.file_id
+                   WHERE fa.person_name = ? AND ff.missing = 0
+               ) t
+               JOIN files f ON f.id = t.fid
+               LEFT JOIN photo_meta pm ON pm.file_id = f.id
+               ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+               LIMIT ? OFFSET ?""",
+            (person, limit, offset),
+        ).fetchall()
+
+    def _person_total(conn, person: str) -> int:
+        row = conn.execute(
+            """SELECT COUNT(DISTINCT fa.file_id)
+               FROM faces fa
+               JOIN files f ON f.id = fa.file_id
+               WHERE fa.person_name = ? AND f.missing = 0""",
+            (person,),
+        ).fetchone()
+        return row[0] if row else 0
+
+    @app.get("/person/{name}", response_class=HTMLResponse)
+    async def person_detail(
+        request: Request,
+        name: str,
+        page: int = Query(0, ge=0),
+    ):
+        from urllib.parse import unquote
+        person = unquote(name)
+        conn = get_conn()
+        try:
+            # Aggregate stats across every cluster with this person_name.
+            stats = conn.execute(
+                """SELECT COUNT(DISTINCT fa.file_id) AS n_photos,
+                          COUNT(*)                    AS n_faces,
+                          COUNT(DISTINCT fa.cluster_id) AS n_clusters,
+                          MIN(pm.taken_at)            AS first_date,
+                          MAX(pm.taken_at)            AS last_date
+                   FROM faces fa
+                   JOIN files f ON f.id = fa.file_id
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE fa.person_name = ? AND f.missing = 0""",
+                (person,),
+            ).fetchone()
+
+            if not stats or not stats["n_photos"]:
+                return HTMLResponse(f"No photos found for '{person}'.", 404)
+
+            # "Through the years": best face per calendar year.
+            # ROW_NUMBER() picks the highest-confidence face per year.
+            year_faces = conn.execute(
+                """SELECT yr, face_id, file_id, content_hash FROM (
+                       SELECT SUBSTR(pm.taken_at, 1, 4) AS yr,
+                              fa.id          AS face_id,
+                              fa.file_id     AS file_id,
+                              f.content_hash AS content_hash,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY SUBSTR(pm.taken_at, 1, 4)
+                                  ORDER BY fa.det_score DESC, fa.id
+                              ) AS rn
+                       FROM faces fa
+                       JOIN files f ON f.id = fa.file_id
+                       JOIN photo_meta pm ON pm.file_id = f.id
+                       WHERE fa.person_name = ? AND f.missing = 0
+                         AND pm.taken_at IS NOT NULL
+                         AND LENGTH(pm.taken_at) >= 4
+                   )
+                   WHERE rn = 1
+                   ORDER BY yr""",
+                (person,),
+            ).fetchall()
+
+            # First page of photos.
+            photos = _person_photos(conn, person, PERSON_PER_PAGE, 0)
+            has_next = PERSON_PER_PAGE < stats["n_photos"]
+
+            return TEMPLATES.TemplateResponse(request, "person.html", {
+                "person": person,
+                "stats": stats,
+                "year_faces": year_faces,
+                "photos": photos,
+                "page": 0,
+                "has_next": has_next,
+            })
+        finally:
+            conn.close()
+
+    @app.get("/person-page/{name}", response_class=HTMLResponse)
+    async def person_page_partial(
+        request: Request,
+        name: str,
+        page: int = Query(0, ge=0),
+    ):
+        """htmx partial: next page of a person's photo grid."""
+        from urllib.parse import unquote
+        person = unquote(name)
+        conn = get_conn()
+        try:
+            offset = page * PERSON_PER_PAGE
+            photos = _person_photos(conn, person, PERSON_PER_PAGE, offset)
+            total = _person_total(conn, person)
+            has_next = offset + PERSON_PER_PAGE < total
+            return TEMPLATES.TemplateResponse(
+                request,
+                "_person_photo_grid.html",
+                {
+                    "photos": photos,
+                    "person": person,
+                    "page": page,
+                    "has_next": has_next,
+                },
+            )
+        finally:
+            conn.close()
+
     @app.get("/photo/{file_id}", response_class=HTMLResponse)
     async def photo_detail(
         request: Request,

@@ -229,8 +229,8 @@
         <div class="face-list-entry" data-sidebar-face="{{ f['id'] }}">
             <span class="dot"></span>
             {% if f['person_name'] %}
-            <a href="/search?person={{ f['person_name']|urlencode }}"
-               title="Find more photos of {{ f['person_name'] }}">{{ f['person_name'] }}</a>
+            <a href="/person/{{ f['person_name']|urlencode }}"
+               title="Open {{ f['person_name'] }}'s timeline">{{ f['person_name'] }}</a>
             {% elif f['cluster_id'] %}
             <a href="/search?cluster={{ f['cluster_id'] }}"
                title="Find more photos in this cluster">Unnamed</a>
