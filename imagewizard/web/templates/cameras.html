@@ -17,8 +17,8 @@
     .camera-card:hover { border-color: var(--highlight); }
     .camera-card a { color: var(--fg); text-decoration: none; }
     .camera-card .model { font-size: 1.05rem; font-weight: 600; }
-    .camera-card .make { font-size: 0.8rem; color: #999; }
-    .camera-card .stats { font-size: 0.85rem; color: #aaa; margin-top: 0.4rem; }
+    .camera-card .make { font-size: 0.8rem; color: var(--muted); }
+    .camera-card .stats { font-size: 0.85rem; color: var(--muted); margin-top: 0.4rem; }
     .camera-card .bar {
         height: 4px;
         background: var(--highlight);
@@ -49,6 +49,6 @@
     {% endfor %}
 </div>
 {% else %}
-<p style="color:#999;margin-top:2rem;">No camera metadata found. Run <code>image-wizard index</code> first.</p>
+<p style="color: var(--muted);margin-top:2rem;">No camera metadata found. Run <code>image-wizard index</code> first.</p>
 {% endif %}
 {% endblock %}

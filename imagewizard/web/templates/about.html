@@ -26,7 +26,7 @@
         padding-left: 0.7rem;
     }
     .stat .num { font-size: 1.4rem; font-weight: 600; }
-    .stat .lbl { font-size: 0.75rem; color: #999; text-transform: uppercase; }
+    .stat .lbl { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
     .root-list { list-style: none; padding: 0; margin: 0; }
     .root-list li {
         display: flex;
@@ -38,13 +38,13 @@
     }
     .root-list li:last-child { border-bottom: none; }
     .root-list .path { word-break: break-all; font-family: ui-monospace, monospace; }
-    .root-list .ts { color: #888; white-space: nowrap; }
-    .about-text p { line-height: 1.55; color: #ccc; }
+    .root-list .ts { color: var(--muted); white-space: nowrap; }
+    .about-text p { line-height: 1.55; color: var(--muted); }
     .about-text a { color: var(--highlight); }
     .db-path {
         font-family: ui-monospace, monospace;
         font-size: 0.75rem;
-        color: #888;
+        color: var(--muted);
         word-break: break-all;
     }
 </style>
@@ -131,7 +131,7 @@
         {% endfor %}
     </ul>
     {% else %}
-    <p style="color:#999;">No directories scanned yet. Run
+    <p style="color: var(--muted);">No directories scanned yet. Run
         <code>image-wizard scan /path/to/photos</code>.</p>
     {% endif %}
 </div>

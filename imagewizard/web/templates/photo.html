@@ -68,7 +68,7 @@
     .toggle-bar { margin: 0.5rem 0; display: flex; gap: 1rem; align-items: center; }
     .toggle-bar label { font-size: 0.85rem; cursor: pointer; user-select: none; }
     .toggle-bar input[type=checkbox] { accent-color: var(--highlight); }
-    .full-link { font-size: 0.8rem; color: #999; margin-left: auto; }
+    .full-link { font-size: 0.8rem; color: var(--muted); margin-left: auto; }
     .full-link:hover { color: var(--highlight); }
     .photo-nav {
         display: flex;
@@ -93,7 +93,7 @@
     .photo-nav .spacer { flex: 1; }
     .photo-nav .position {
         font-size: 0.8rem;
-        color: #888;
+        color: var(--muted);
         padding: 0 0.5rem;
     }
     .photo-nav .position.in-search {
@@ -103,7 +103,7 @@
         display: inline-block;
         margin-left: auto;
         font-size: 0.8rem;
-        color: #999;
+        color: var(--muted);
         text-decoration: none;
     }
     .jump-link:hover { color: var(--highlight); }
@@ -237,13 +237,13 @@
             {% else %}
             <span>Unnamed</span>
             {% endif %}
-            <span style="color:#666;font-size:0.75rem;">
+            <span style="color:var(--muted);font-size:0.75rem;">
                 {{ "%.0f"|format(f['det_score']*100) }}%
                 {% if f['cluster_id'] %} · cluster #{{ f['cluster_id'] }}{% endif %}
             </span>
         </div>
         {% endfor %}
-        <div style="margin-top:0.4rem;font-size:0.75rem;color:#666;">
+        <div style="margin-top:0.4rem;font-size:0.75rem;color:var(--muted);">
             Click a face bbox on the image to name it.
         </div>
         {% endif %}

@@ -11,8 +11,12 @@
             --bg: #1a1a2e;
             --bg2: #16213e;
             --fg: #e0e0e0;
-            --accent: #0f3460;
+            --muted: #a8b2c8;
+            --accent: #3a6ea5;      /* pill background — lightened for contrast */
+            --accent-deep: #0f3460; /* original dark navy, kept for borders/fills */
             --highlight: #e94560;
+            --link: #7cc7ff;        /* default link colour on dark bg */
+            --link-hover: #ffc870;
             --card: #1f2940;
             --border: #2a3a5c;
         }
@@ -23,6 +27,11 @@
             color: var(--fg);
             min-height: 100vh;
         }
+        /* Default link colour: bright sky-blue on dark bg (WCAG AA on --bg). */
+        a { color: var(--link); text-decoration: none; }
+        a:hover { color: var(--link-hover); }
+        /* Grid/thumbnail links inherit — the image itself carries the meaning. */
+        .grid a, .face-card a { color: inherit; }
         nav {
             background: var(--bg2);
             padding: 0.8rem 1.5rem;
@@ -125,7 +134,7 @@
         }
         .face-card form { margin-top: 0.3rem; }
         .face-card input[type=text] { width: 100%; margin-bottom: 0.3rem; }
-        .stats-bar { font-size: 0.85rem; color: #999; margin-bottom: 0.5rem; }
+        .stats-bar { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.5rem; }
     </style>
     {% block head_extra %}{% endblock %}
 </head>

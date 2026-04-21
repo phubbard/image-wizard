@@ -4,11 +4,11 @@
 <style>
     .nearby-header {
         margin-bottom: 0.8rem;
-        color: #aaa;
+        color: var(--muted);
         font-size: 0.9rem;
     }
     .nearby-header strong { color: var(--fg); }
-    .grid a .caption small { color: #888; }
+    .grid a .caption small { color: var(--muted); }
 </style>
 {% endblock %}
 {% block content %}
@@ -35,13 +35,13 @@
     {% if page > 0 %}
     <a href="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page - 1 }}" class="btn">Previous</a>
     {% endif %}
-    <span style="color:#999;align-self:center;">Page {{ page + 1 }}</span>
+    <span style="color: var(--muted);align-self:center;">Page {{ page + 1 }}</span>
     {% if has_next %}
     <a href="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page + 1 }}" class="btn">Next</a>
     {% endif %}
 </div>
 {% endif %}
 {% else %}
-<p style="color:#999;margin-top:2rem;">No photos within {{ radius_km }} km.</p>
+<p style="color: var(--muted);margin-top:2rem;">No photos within {{ radius_km }} km.</p>
 {% endif %}
 {% endblock %}
