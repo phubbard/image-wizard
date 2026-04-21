@@ -137,6 +137,24 @@ def _recompute_cluster_centroids(
         )
 
 
+def _purge_empty_clusters(conn: sqlite3.Connection) -> int:
+    """Delete `face_clusters` rows that no longer have any member faces.
+
+    Clusters get orphaned when every source photo they reference is later
+    deleted (CASCADE removes the `faces` rows but the `face_clusters` row
+    persists, leaving a phantom card on the Faces page with a stale
+    face_count and no representative thumbnail).
+    """
+    cur = conn.execute(
+        """DELETE FROM face_clusters
+           WHERE cluster_id NOT IN (
+               SELECT DISTINCT cluster_id FROM faces
+               WHERE cluster_id IS NOT NULL
+           )"""
+    )
+    return cur.rowcount or 0
+
+
 def _inherit_names(conn: sqlite3.Connection) -> None:
     """For unnamed clusters, adopt a name that ≥2 member faces already carry."""
     unnamed = conn.execute(
@@ -311,6 +329,7 @@ def cluster_faces_incremental(
             new_cluster_assignments.values()
         )
         _recompute_cluster_centroids(conn, touched)
+        _purge_empty_clusters(conn)
         _inherit_names(conn)
 
         conn.execute("COMMIT")
@@ -413,6 +432,7 @@ def cluster_faces_full(
         for cid in existing_ids:
             touched.add(cid)
         _recompute_cluster_centroids(conn, touched)
+        _purge_empty_clusters(conn)
         _inherit_names(conn)
 
         conn.execute("COMMIT")

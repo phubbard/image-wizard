@@ -595,20 +595,34 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     FACES_PER_PAGE = 48
 
     def _load_face_clusters(conn, page: int) -> tuple[list, int, bool]:
-        """Return (clusters_on_this_page, total_clusters, has_next)."""
+        """Return (clusters_on_this_page, total_clusters, has_next).
+
+        Live-counts faces via a LEFT JOIN so stale `face_clusters.face_count`
+        values (from clusters whose source photos were later deleted) don't
+        produce phantom empty cards on the grid. Empty clusters are excluded
+        via HAVING.
+        """
         offset = page * FACES_PER_PAGE
-        total = conn.execute("SELECT COUNT(*) FROM face_clusters").fetchone()[0]
+        # Total = number of clusters that currently have ≥1 face.
+        total = conn.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM faces WHERE cluster_id IS NOT NULL"
+        ).fetchone()[0]
         rows = conn.execute(
-            """SELECT fc.cluster_id, fc.person_name, fc.face_count,
-                      (SELECT f.content_hash FROM faces fa
-                       JOIN files f ON f.id = fa.file_id
-                       WHERE fa.cluster_id = fc.cluster_id
-                       ORDER BY fa.det_score DESC LIMIT 1) AS rep_hash,
-                      (SELECT fa.file_id FROM faces fa
-                       WHERE fa.cluster_id = fc.cluster_id
-                       ORDER BY fa.det_score DESC LIMIT 1) AS rep_file_id
+            """SELECT fc.cluster_id,
+                      fc.person_name,
+                      COUNT(fa.id) AS face_count,
+                      (SELECT f.content_hash FROM faces fa2
+                       JOIN files f ON f.id = fa2.file_id
+                       WHERE fa2.cluster_id = fc.cluster_id
+                       ORDER BY fa2.det_score DESC LIMIT 1) AS rep_hash,
+                      (SELECT fa2.file_id FROM faces fa2
+                       WHERE fa2.cluster_id = fc.cluster_id
+                       ORDER BY fa2.det_score DESC LIMIT 1) AS rep_file_id
                FROM face_clusters fc
-               ORDER BY fc.face_count DESC
+               LEFT JOIN faces fa ON fa.cluster_id = fc.cluster_id
+               GROUP BY fc.cluster_id
+               HAVING COUNT(fa.id) > 0
+               ORDER BY face_count DESC
                LIMIT ? OFFSET ?""",
             (FACES_PER_PAGE, offset),
         ).fetchall()
