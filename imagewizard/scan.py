@@ -556,41 +556,100 @@ def register(parent: typer.Typer) -> None:
     @parent.command(name="regen-thumbs")
     def cmd_regen_thumbs(
         workers: int = typer.Option(4, "--workers", "-w", help="Decode threads."),
+        force: bool = typer.Option(
+            False, "--force",
+            help="Re-generate even if a cached thumbnail already exists.",
+        ),
+        rotated: bool = typer.Option(
+            False, "--rotated",
+            help="Only re-generate thumbnails whose source EXIF has a "
+                 "non-trivial Orientation tag (i.e. needs rotation). Use "
+                 "this to repair thumbs cached before orientation handling "
+                 "was added to load_image.",
+        ),
+        camera: str = typer.Option(
+            "", "--camera",
+            help="Only re-generate thumbs for photos taken with this "
+                 "camera_model (exact match).",
+        ),
     ) -> None:
-        """Regenerate missing thumbnails (e.g. after clearing the cache)."""
-        from concurrent.futures import ThreadPoolExecutor
+        """Regenerate thumbnails.
+
+        Default (no flags): generate any thumbnails that are missing.
+        With ``--force`` or ``--rotated`` it will overwrite existing
+        cached thumbs, which is how to repair thumbs from older code
+        that didn't apply EXIF orientation.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from .decode import load_image
         from .thumbs import ensure_thumbnail, thumb_path
+        from PIL import Image, ExifTags
 
         cfg = config.load()
         conn = db.connect(cfg.db_path)
         console = Console(stderr=True)
         try:
-            rows = conn.execute(
-                "SELECT id, path, content_hash FROM files WHERE missing=0"
-            ).fetchall()
-            # Filter to only those missing a thumbnail
-            todo = [
-                r for r in rows
-                if not thumb_path(cfg.cache_dir, r["content_hash"]).exists()
-            ]
-            console.print(f"{len(todo)} thumbnails to regenerate")
+            sql = "SELECT f.id, f.path, f.content_hash FROM files f"
+            params: list = []
+            where = ["f.missing=0"]
+            if camera:
+                sql += " JOIN photo_meta pm ON pm.file_id = f.id"
+                where.append("pm.camera_model = ?")
+                params.append(camera)
+            sql += " WHERE " + " AND ".join(where)
+            rows = conn.execute(sql, params).fetchall()
+            console.print(f"{len(rows)} candidate files")
+
+            ORIENT_TAG = next(
+                (k for k, v in ExifTags.TAGS.items() if v == "Orientation"),
+                274,  # well-known tag id; fallback if Pillow lookup fails
+            )
+
+            def needs_rotation(path: str) -> bool:
+                """True if EXIF Orientation indicates the file needs rotation
+                to display correctly. Cheap — only reads the EXIF dict."""
+                try:
+                    with Image.open(path) as im:
+                        exif = im.getexif()
+                        return int(exif.get(ORIENT_TAG, 1)) != 1
+                except Exception:
+                    return False
+
+            # Filter the work list down to what actually needs doing.
+            todo = []
+            if rotated:
+                console.print("[dim]scanning EXIF orientation...[/dim]")
+                for r in rows:
+                    if needs_rotation(r["path"]):
+                        todo.append(r)
+                console.print(f"  {len(todo)} files need rotation")
+            else:
+                for r in rows:
+                    if force or not thumb_path(cfg.cache_dir, r["content_hash"]).exists():
+                        todo.append(r)
+
             if not todo:
+                console.print("nothing to do")
                 return
+            console.print(f"regenerating {len(todo)} thumbnails (force={force or rotated})")
 
             done = 0
             errors = 0
 
             def regen(row):
                 img = load_image(Path(row["path"]))
-                ensure_thumbnail(img, cfg.cache_dir, row["content_hash"])
+                # rotated implies force — we know the cached thumb is wrong
+                ensure_thumbnail(
+                    img, cfg.cache_dir, row["content_hash"],
+                    force=force or rotated,
+                )
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 from rich.progress import Progress, BarColumn, MofNCompleteColumn, SpinnerColumn
                 with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(), console=console) as prog:
                     task = prog.add_task("thumbnails", total=len(todo))
                     futures = {pool.submit(regen, r): r for r in todo}
-                    for fut in futures:
+                    for fut in as_completed(futures):
                         try:
                             fut.result()
                             done += 1
