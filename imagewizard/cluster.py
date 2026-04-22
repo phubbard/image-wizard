@@ -45,10 +45,21 @@ EMB_DIM = 512
 
 
 def _l2norm(m: np.ndarray) -> np.ndarray:
-    """Row-wise L2 normalize. Safe against zero rows."""
+    """Row-wise L2 normalize. Safe against zero / NaN / Inf rows.
+
+    Zero-magnitude rows are kept as all-zero (not divided by a tiny
+    epsilon, which would blow them up to huge values that overflow in
+    later float32 matmuls). NaN/Inf values are replaced with zero
+    before normalising so a single corrupt embedding can't poison the
+    whole matrix.
+    """
+    m = np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
     n = np.linalg.norm(m, axis=1, keepdims=True)
-    n = np.maximum(n, 1e-10)
-    return m / n
+    safe = np.where(n > 0, n, 1.0)
+    out = m / safe
+    # Rows that were originally zero-magnitude → stay zero.
+    out = np.where(n > 0, out, 0.0)
+    return out
 
 
 def _load_embeddings_where(
@@ -81,7 +92,12 @@ def _load_embeddings_where(
 def _load_existing_clusters(
     conn: sqlite3.Connection,
 ) -> tuple[list[int], np.ndarray, dict[int, str]]:
-    """Return (cluster_ids, L2-normed centroid matrix, {cid: person_name})."""
+    """Return (cluster_ids, L2-normed centroid matrix, {cid: person_name}).
+
+    Degenerate centroids (all-zero, NaN, Inf) are skipped entirely —
+    matching a new face against a zero vector is meaningless and the
+    bogus values cause overflow warnings in the downstream matmul.
+    """
     ids: list[int] = []
     cents: list[np.ndarray] = []
     names: dict[int, str] = {}
@@ -89,9 +105,12 @@ def _load_existing_clusters(
         "SELECT cluster_id, centroid, person_name FROM face_clusters"
     ).fetchall():
         c = np.frombuffer(row["centroid"], dtype=np.float32).copy()
+        c = np.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
         n = np.linalg.norm(c)
-        if n > 0:
-            c = c / n
+        if not np.isfinite(n) or n <= 0:
+            # Unusable — skip this cluster during the matching pass.
+            continue
+        c = c / n
         ids.append(row["cluster_id"])
         cents.append(c)
         if row["person_name"]:
