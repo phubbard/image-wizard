@@ -659,3 +659,124 @@ def register(parent: typer.Typer) -> None:
             Console().print(f"  done: {done}, errors: {errors}")
         finally:
             conn.close()
+
+    @parent.command(name="diagnose")
+    def cmd_diagnose(
+        target: str = typer.Argument(
+            ...,
+            help="A file id (integer), content hash, or path. Any of the "
+                 "three uniquely identifies one indexed photo.",
+        ),
+    ) -> None:
+        """Print everything known about one photo.
+
+        Useful for answering "why does this photo have no faces / no
+        objects / no metadata?" — you get pipeline flags, row counts
+        across every table touching this file, and whether the source
+        file is still on disk.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            # Resolve target → files row.
+            row = None
+            if target.isdigit():
+                row = conn.execute(
+                    "SELECT * FROM files WHERE id=?", (int(target),)
+                ).fetchone()
+            if row is None and len(target) == 64:
+                row = conn.execute(
+                    "SELECT * FROM files WHERE content_hash=?", (target,)
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT * FROM files WHERE path=?", (target,)
+                ).fetchone()
+            if row is None:
+                # Fallback: substring match on path
+                row = conn.execute(
+                    "SELECT * FROM files WHERE path LIKE ? LIMIT 1",
+                    (f"%{target}%",),
+                ).fetchone()
+            if row is None:
+                console.print(f"[red]no file matches {target!r}[/red]")
+                raise typer.Exit(1)
+
+            fid = row["id"]
+            console.print(f"[bold]file #{fid}[/bold]  {row['path']}")
+            console.print(f"  content_hash: {row['content_hash']}")
+            console.print(f"  size: {row['size']} bytes  mtime: {row['mtime']}")
+            console.print(f"  dimensions: {row['width']}x{row['height']}")
+            console.print(
+                f"  mime: {row['mime']}  missing: {bool(row['missing'])}  "
+                f"on disk: {Path(row['path']).exists()}"
+            )
+
+            console.print("\n[bold]Pipeline stage flags[/bold]")
+            for stage in ("meta_done", "yolo_done", "faces_done", "clip_done"):
+                mark = "[green]✓[/green]" if row[stage] else "[red]✗[/red]"
+                console.print(f"  {mark} {stage}")
+
+            meta = conn.execute(
+                "SELECT * FROM photo_meta WHERE file_id=?", (fid,)
+            ).fetchone()
+            if meta:
+                console.print("\n[bold]photo_meta[/bold]")
+                for k in meta.keys():
+                    v = meta[k]
+                    if v is not None:
+                        console.print(f"  {k}: {v}")
+            else:
+                console.print(
+                    "\n[yellow]no photo_meta row[/yellow] "
+                    "(metadata stage hasn't produced output)"
+                )
+
+            dets = conn.execute(
+                "SELECT label, conf FROM detections WHERE file_id=? ORDER BY conf DESC",
+                (fid,),
+            ).fetchall()
+            console.print(f"\n[bold]detections:[/bold] {len(dets)} row(s)")
+            for d in dets[:10]:
+                console.print(f"  {d['label']:20s} {d['conf']*100:.1f}%")
+
+            faces = conn.execute(
+                """SELECT id, cluster_id, person_name, det_score
+                   FROM faces WHERE file_id=?""",
+                (fid,),
+            ).fetchall()
+            console.print(f"\n[bold]faces:[/bold] {len(faces)} row(s)")
+            for f in faces:
+                console.print(
+                    f"  face#{f['id']} cluster={f['cluster_id']} "
+                    f"name={f['person_name']!r} score={f['det_score']*100:.1f}%"
+                )
+
+            clip = conn.execute(
+                "SELECT rowid FROM vec_clip WHERE rowid=?", (fid,)
+            ).fetchone()
+            console.print(
+                f"\n[bold]CLIP embedding:[/bold] "
+                f"{'present' if clip else 'missing'}"
+            )
+
+            # Suggest next action
+            missing_stages = [
+                s for s in ("meta_done", "yolo_done", "faces_done", "clip_done")
+                if not row[s]
+            ]
+            if missing_stages:
+                console.print(
+                    f"\n[yellow]suggested:[/yellow] re-run "
+                    f"`image-wizard index` — stages {missing_stages} "
+                    "haven't completed on this file."
+                )
+            elif len(dets) == 0 and len(faces) == 0:
+                console.print(
+                    "\n[green]all stages ran.[/green] "
+                    "Zero detections + zero faces means the models genuinely "
+                    "found nothing in this image — not a pipeline bug."
+                )
+        finally:
+            conn.close()

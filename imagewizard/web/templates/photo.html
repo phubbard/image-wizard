@@ -253,6 +253,35 @@
             Click a face bbox on the image to name it.
         </div>
         {% endif %}
+
+        {# Pipeline state — one-glance diagnostic for "why does this
+           photo have no detections/faces?". A ✓ means the stage ran to
+           completion on this file; ✗ means it hasn't run yet. If a
+           stage ✓'d but the panel above is empty, the model genuinely
+           found nothing (not a pipeline bug). #}
+        <h3 style="margin-top:1rem;">Pipeline</h3>
+        <div style="font-size:0.8rem;">
+            {% set stages = [
+                ('Metadata', file['meta_done']),
+                ('Objects (YOLO)', file['yolo_done']),
+                ('Faces', file['faces_done']),
+                ('CLIP embedding', file['clip_done']),
+            ] %}
+            {% for name, done in stages %}
+            <div style="display:flex;justify-content:space-between;padding:2px 0;">
+                <span>{{ name }}</span>
+                <span style="color:{% if done %}#6bcf7f{% else %}var(--highlight){% endif %};">
+                    {% if done %}✓ ran{% else %}✗ pending{% endif %}
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+        {% if detections|length == 0 and faces|length == 0 and file['yolo_done'] and file['faces_done'] %}
+        <div style="font-size:0.75rem;color:var(--muted);margin-top:0.3rem;">
+            Both detectors ran and found nothing — this photo genuinely has
+            no recognisable objects or faces (not a bug).
+        </div>
+        {% endif %}
     </div>
 </div>
 
