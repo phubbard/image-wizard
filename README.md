@@ -55,21 +55,81 @@ or modified files.
 
 ## Commands
 
+Every command is greppable from this README so you can copy-paste straight into
+a terminal. Run any command with `--help` for the full option list.
+
+### Setup & ingest
+
+```bash
+# Create database + directories
+image-wizard init
+
+# Discover files and SHA-256 hash them (no ML work yet)
+image-wizard scan ~/Photos /Volumes/SD-Card/DCIM
+image-wizard scan ~/Photos --prune            # mark on-disk deletions missing
+image-wizard scan ~/Photos --min-pixels 320   # skip tiny thumbnails
+
+# Run the ML pipeline on files that have been scanned but not yet indexed
+image-wizard index                            # full pipeline, resumable
+image-wizard index -n 1000                    # limit to N files this run
+image-wizard index --no-yolo --no-clip        # metadata + faces only
+image-wizard index --workers 8 --prefetch 16  # more decode parallelism
 ```
-image-wizard init                              Create database + directories
-image-wizard scan PATH... [--prune]            Discover files, hash, skip thumbnails
-                          [--min-pixels 320]
-image-wizard index        [-n LIMIT]           Run ML pipeline on unindexed files
-                          [--no-yolo]
-                          [--no-faces]
-                          [--no-clip]
-                          [--workers 4]        Prefetch/decode threads
-                          [--prefetch 8]       Queue depth
-image-wizard cluster-faces [--min-size 3]      HDBSCAN face clustering
-image-wizard search "query" [-k 20]            CLIP text-to-image search
-image-wizard stats                             Library counts, cameras, date range
-image-wizard serve [--port 8765] [--reload]    Web UI (--reload for development)
-image-wizard drop-small [--min-pixels 320]     Remove small images from DB
+
+### Faces & people
+
+```bash
+# Cluster new (unclustered) faces into identities. Fast; rerun after each index.
+image-wizard cluster-faces
+image-wizard cluster-faces --full             # rebuild every cluster from scratch
+image-wizard cluster-faces --min-size 3       # tighter clusters (default: 3)
+```
+
+### Browse
+
+```bash
+# Web UI
+image-wizard serve                            # http://0.0.0.0:8765
+image-wizard serve --host 127.0.0.1           # restrict to localhost
+image-wizard serve --port 9000                # custom port
+image-wizard serve --reload                   # auto-reload on code changes
+
+# CLI CLIP search (web UI has more filters)
+image-wizard search "dog on a beach"
+image-wizard search "sunset" -k 20
+```
+
+### Inspect & diagnose
+
+```bash
+# Library counts, cameras, date range
+image-wizard stats
+
+# Everything known about one photo: stage flags, row counts across all
+# tables, CLIP embedding presence, disk status. Accepts id/hash/path.
+image-wizard diagnose 267428
+image-wizard diagnose /Users/pfh/Photos/IMG_0036.JPG
+image-wizard diagnose c873bad96d2e3eab...
+```
+
+### Maintenance & repair
+
+```bash
+# Regenerate thumbnails
+image-wizard regen-thumbs                     # missing thumbs only
+image-wizard regen-thumbs --force             # overwrite all (slow)
+image-wizard regen-thumbs --rotated           # only thumbs with non-trivial
+                                              # EXIF orientation (repairs sideways
+                                              # thumbs cached by older code)
+image-wizard regen-thumbs --camera "iPhone"   # scope to one camera
+
+# Clean up the index
+image-wizard drop-small --min-pixels 320      # remove small images from DB
+image-wizard drop-videos                      # remove .mov/.mp4 rows
+image-wizard fix-orientations                 # reset ML flags for files whose
+                                              # stored dims don't match rotated image
+image-wizard find-duplicates                  # list files sharing a content_hash
+image-wizard find-duplicates --delete         # also remove redundant copies
 ```
 
 ## Web UI
@@ -156,23 +216,19 @@ imagewizard/
 
 Override with `IMAGEWIZARD_DATA_DIR` and `IMAGEWIZARD_CACHE_DIR` env vars.
 
-## Maintenance
+## Typical workflows
 
 ```bash
-# Re-scan after adding/removing photos
+# After adding new photos on disk
 image-wizard scan ~/Photos --prune
-
-# Re-index only new files
 image-wizard index
-
-# Re-cluster after new faces are indexed
 image-wizard cluster-faces
 
-# Remove old thumbnails from DB (< 320px)
-image-wizard drop-small
+# Something looks wrong with one photo — get a full report
+image-wizard diagnose <id|path|hash>
 
-# Development mode (auto-reload on code changes)
-image-wizard serve --reload
+# Sideways thumbnails after pulling a newer build
+image-wizard regen-thumbs --rotated
 ```
 
 ## License
