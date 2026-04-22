@@ -40,10 +40,12 @@
         left: 50%;
         transform: translateX(-50%);
         display: flex;
+        flex-wrap: wrap;
         gap: 4px;
         z-index: 50;
         white-space: nowrap;
     }
+    .face-popover .merge-hint { flex-basis: 100%; }
     .face-popover input[type=text] {
         width: 130px;
         font-size: 0.8rem;
@@ -123,6 +125,10 @@
 </style>
 {% endblock %}
 {% block content %}
+{# Server-rendered autocomplete source for the face-naming popover. #}
+<datalist id="people-list">
+    {% for p in people %}<option value="{{ p }}">{% endfor %}
+</datalist>
 <div class="photo-nav">
     {% if prev_id %}
     <a href="/photo/{{ prev_id }}{{ search_qs }}">&#8592; Prev</a>
@@ -286,29 +292,13 @@ function closePopover() {
     document.querySelectorAll('.bbox.face.active').forEach(b => b.classList.remove('active'));
 }
 
-// Shared autocomplete + "will merge" hint data, fetched once per page.
-// peopleNames is populated before any popover opens (promise-gated by
-// awaiting inside the click handler is overkill — the fetch is fast and
-// a popover opened before it resolves just has no suggestions).
-const peopleNames = new Set();
-(function loadPeople() {
-    let dl = document.getElementById('people-list');
-    if (!dl) {
-        dl = document.createElement('datalist');
-        dl.id = 'people-list';
-        document.body.appendChild(dl);
-    }
-    fetch('/api/people.json').then(r => r.json()).then(people => {
-        dl.innerHTML = '';
-        people.forEach(p => {
-            peopleNames.add(p.name.toLowerCase());
-            const opt = document.createElement('option');
-            opt.value = p.name;
-            opt.label = p.count + ' photo' + (p.count === 1 ? '' : 's');
-            dl.appendChild(opt);
-        });
-    });
-})();
+// Shared autocomplete source is server-rendered (see <datalist
+// id="people-list"> near the top of the body). Build a Set of
+// lower-cased names for the "will merge" hint below the popover input.
+const peopleNames = new Set(
+    Array.from(document.querySelectorAll('#people-list option'))
+        .map(o => o.value.toLowerCase())
+);
 
 // Face bbox click → inline name popover
 document.querySelectorAll('.bbox.face').forEach(el => {

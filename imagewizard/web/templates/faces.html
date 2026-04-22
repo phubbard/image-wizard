@@ -56,9 +56,12 @@
     · <span style="color:var(--muted);">typing an existing name auto-merges clusters</span>
 </div>
 
-{# Shared autocomplete source — populated from /api/people.json. Each
-   cluster's <input> and the merge bar both reference list="people-list". #}
-<datalist id="people-list"></datalist>
+{# Shared autocomplete source — server-rendered so suggestions are ready
+   before any JS runs. Each cluster's <input> and the merge bar both
+   reference list="people-list". #}
+<datalist id="people-list">
+    {% for p in people %}<option value="{{ p }}">{% endfor %}
+</datalist>
 
 <div class="merge-bar" id="merge-bar">
     <span class="count" id="merge-count">0 selected</span>
@@ -75,25 +78,15 @@
 <script>
 if (history.scrollRestoration) history.scrollRestoration = 'auto';
 
-// --- Autocomplete: fetch existing people once and populate the shared
-// <datalist>. Each cluster's name input (see _faces_grid.html) has
-// list="people-list", so the browser surfaces these as suggestions.
-// We also keep a Set of lower-cased names so we can show a "will merge"
-// hint next to the Save button when the user types an existing name.
-const peopleNames = new Set();
-fetch('/api/people.json').then(r => r.json()).then(people => {
-    const dl = document.getElementById('people-list');
-    dl.innerHTML = '';
-    people.forEach(p => {
-        peopleNames.add(p.name.toLowerCase());
-        const opt = document.createElement('option');
-        opt.value = p.name;
-        opt.label = p.count + ' photo' + (p.count === 1 ? '' : 's');
-        dl.appendChild(opt);
-    });
-    // Attach live "will merge" hints now that we know the name set.
-    document.querySelectorAll('.face-card').forEach(attachMergeHint);
-});
+// --- Autocomplete: the <datalist> is server-rendered so suggestions are
+// already present on first paint. We build a lower-cased Set from its
+// options so we can flash a "will merge" hint when the user types an
+// existing name.
+const peopleNames = new Set(
+    Array.from(document.querySelectorAll('#people-list option'))
+        .map(o => o.value.toLowerCase())
+);
+document.querySelectorAll('.face-card').forEach(attachMergeHint);
 
 function attachMergeHint(card) {
     const input = card.querySelector('input[name=name]');

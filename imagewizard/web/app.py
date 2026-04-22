@@ -448,6 +448,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "search_position": search_position,
                 "search_total": search_total,
                 "timeline_link": timeline_link,
+                "people": _all_people(conn),
             })
         finally:
             conn.close()
@@ -629,6 +630,18 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         has_next = offset + FACES_PER_PAGE < total
         return rows, total, has_next
 
+    def _all_people(conn) -> list[str]:
+        """List of distinct person names (for server-rendered autocomplete)."""
+        return [
+            r["name"]
+            for r in conn.execute(
+                """SELECT DISTINCT person_name AS name
+                   FROM faces
+                   WHERE person_name IS NOT NULL AND person_name != ''
+                   ORDER BY person_name COLLATE NOCASE"""
+            ).fetchall()
+        ]
+
     @app.get("/faces", response_class=HTMLResponse)
     async def faces_page(request: Request, page: int = Query(0, ge=0)):
         conn = get_conn()
@@ -639,6 +652,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "total": total,
                 "page": page,
                 "has_next": has_next,
+                "people": _all_people(conn),
             })
         finally:
             conn.close()
