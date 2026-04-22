@@ -1,0 +1,19 @@
+{% for p in photos %}
+<a id="photo-{{ p['id'] }}" href="/photo/{{ p['id'] }}">
+    <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
+         alt="{{ p['taken_at'] or '' }}">
+    <span class="caption">
+        {{ (p['taken_at'] or '')[:10] }}
+        {% if p['city'] %} · {{ p['city'] }}{% endif %}
+        <br><small>{{ "%.2f"|format(p['distance_km']) }} km</small>
+    </span>
+</a>
+{% endfor %}
+{% if has_next %}
+<div hx-get="/nearby-page?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page + 1 }}"
+     hx-trigger="revealed"
+     hx-swap="afterend"
+     hx-replace-url="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page + 1 }}"
+     style="height:1px;grid-column:1 / -1;">
+</div>
+{% endif %}

@@ -1,0 +1,22 @@
+{% for p in photos %}
+<a id="photo-{{ p['id'] }}" href="/photo/{{ p['id'] }}">
+    <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
+         alt="{{ p['taken_at'] or '' }}">
+    <span class="caption">
+        {{ (p['taken_at'] or '')[:10] }}
+        {% if p['city'] %} · {{ p['city'] }}{% endif %}
+    </span>
+</a>
+{% endfor %}
+{% if has_next %}
+{# Trigger element. The hx-replace-url keeps the URL in sync with the
+   page count so that pressing back later restores the same scroll
+   position via the browser's default scroll restoration. #}
+{% set lens_qs %}{% if selected_lens is not none %}&lens={{ selected_lens|urlencode }}{% endif %}{% endset %}
+<div hx-get="/camera-page/{{ camera_model|urlencode }}?page={{ page + 1 }}{{ lens_qs }}"
+     hx-trigger="revealed"
+     hx-swap="afterend"
+     hx-replace-url="/camera/{{ camera_model|urlencode }}?page={{ page + 1 }}{{ lens_qs }}"
+     style="height:1px;grid-column:1 / -1;">
+</div>
+{% endif %}

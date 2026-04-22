@@ -18,29 +18,11 @@
 </div>
 {% if photos %}
 <div class="grid">
-    {% for p in photos %}
-    <a href="/photo/{{ p['id'] }}">
-        <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
-             alt="{{ p['taken_at'] or '' }}">
-        <span class="caption">
-            {{ (p['taken_at'] or '')[:10] }}
-            {% if p['city'] %} · {{ p['city'] }}{% endif %}
-            <br><small>{{ "%.2f"|format(p['distance_km']) }} km</small>
-        </span>
-    </a>
-    {% endfor %}
+    {% include "_nearby_grid.html" %}
 </div>
-{% if page > 0 or has_next %}
-<div style="display:flex;gap:1rem;justify-content:center;margin-top:1rem;">
-    {% if page > 0 %}
-    <a href="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page - 1 }}" class="btn">Previous</a>
-    {% endif %}
-    <span style="color: var(--muted);align-self:center;">Page {{ page + 1 }}</span>
-    {% if has_next %}
-    <a href="/nearby?lat={{ lat }}&lon={{ lon }}&radius_km={{ radius_km }}&page={{ page + 1 }}" class="btn">Next</a>
-    {% endif %}
-</div>
-{% endif %}
+<script>
+if (history.scrollRestoration) history.scrollRestoration = 'auto';
+</script>
 {% else %}
 <p style="color: var(--muted);margin-top:2rem;">No photos within {{ radius_km }} km.</p>
 {% endif %}

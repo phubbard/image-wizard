@@ -1095,6 +1095,41 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             })
         return out
 
+    CAMERA_PER_PAGE = 60
+
+    def _camera_where(camera_model: str, lens: str | None) -> tuple[str, list]:
+        """Build WHERE + params for the camera detail page.
+
+        ``lens`` is a tab-separated bundle of EXIF lens strings that all
+        map to one physical lens (iOS reports the same lens differently
+        per camera mode). Empty-string param means the "(no lens info)"
+        pill — matches NULL lens rows.
+        """
+        where = "pm.camera_model = ? AND f.missing = 0"
+        params: list = [camera_model]
+        if lens is not None:
+            if lens == "":
+                where += " AND pm.lens IS NULL"
+            else:
+                parts = [p for p in lens.split("\t") if p]
+                if parts:
+                    placeholders = ",".join("?" * len(parts))
+                    where += f" AND pm.lens IN ({placeholders})"
+                    params.extend(parts)
+        return where, params
+
+    def _camera_photos(conn, where, params, limit, offset):
+        return conn.execute(
+            f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                       pm.taken_at, pm.camera_model, pm.city, pm.country
+                FROM files f
+                JOIN photo_meta pm ON pm.file_id = f.id
+                WHERE {where}
+                ORDER BY pm.taken_at DESC
+                LIMIT ? OFFSET ?""",
+            params + [limit, offset],
+        ).fetchall()
+
     @app.get("/camera/{camera_model}", response_class=HTMLResponse)
     async def camera_detail(
         request: Request,
@@ -1104,42 +1139,20 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     ):
         conn = get_conn()
         try:
-            per_page = 60
-            offset = page * per_page
-
-            # `lens` is a tab-separated bundle of EXIF lens strings that
-            # all map to one physical lens (e.g. iOS reports the same
-            # lens differently per camera mode). Empty-string param =
-            # "(no lens info)" pill → matches NULL lens rows.
-            where = "pm.camera_model = ? AND f.missing = 0"
-            params: list = [camera_model]
-            if lens is not None:
-                if lens == "":
-                    where += " AND pm.lens IS NULL"
-                else:
-                    parts = [p for p in lens.split("\t") if p]
-                    if parts:
-                        placeholders = ",".join("?" * len(parts))
-                        where += f" AND pm.lens IN ({placeholders})"
-                        params.extend(parts)
-
+            where, params = _camera_where(camera_model, lens)
             total = conn.execute(
                 f"""SELECT COUNT(*) FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
                     WHERE {where}""",
                 params,
             ).fetchone()[0]
-            rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
-                           pm.taken_at, pm.camera_model, pm.city, pm.country
-                    FROM files f
-                    JOIN photo_meta pm ON pm.file_id = f.id
-                    WHERE {where}
-                    ORDER BY pm.taken_at DESC
-                    LIMIT ? OFFSET ?""",
-                params + [per_page, offset],
-            ).fetchall()
-            has_next = offset + per_page < total
+            # Initial render: load every page from 0..page inclusive, so the
+            # rendered grid height matches what was on screen when the user
+            # navigated away. The browser then restores scroll position via
+            # the default history.scrollRestoration = "auto".
+            load_count = (page + 1) * CAMERA_PER_PAGE
+            rows = _camera_photos(conn, where, params, load_count, 0)
+            has_next = load_count < total
             return TEMPLATES.TemplateResponse(request, "camera_detail.html", {
                 "camera_model": camera_model,
                 "photos": rows,
@@ -1152,6 +1165,79 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/camera-page/{camera_model}", response_class=HTMLResponse)
+    async def camera_page_partial(
+        request: Request,
+        camera_model: str,
+        page: int = Query(0, ge=0),
+        lens: str | None = Query(None),
+    ):
+        """htmx partial: next page of the camera-detail photo grid."""
+        conn = get_conn()
+        try:
+            where, params = _camera_where(camera_model, lens)
+            offset = page * CAMERA_PER_PAGE
+            rows = _camera_photos(conn, where, params, CAMERA_PER_PAGE, offset)
+            total = conn.execute(
+                f"""SELECT COUNT(*) FROM files f
+                    JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {where}""",
+                params,
+            ).fetchone()[0]
+            has_next = offset + CAMERA_PER_PAGE < total
+            return TEMPLATES.TemplateResponse(
+                request, "_camera_grid.html",
+                {
+                    "photos": rows,
+                    "camera_model": camera_model,
+                    "selected_lens": lens,
+                    "page": page,
+                    "has_next": has_next,
+                },
+            )
+        finally:
+            conn.close()
+
+    NEARBY_PER_PAGE = 60
+
+    def _nearby_scored(conn, lat, lon, radius_km) -> list[tuple[float, dict]]:
+        """Compute haversine-filtered, distance-sorted photos within radius.
+
+        Returned list is the full result set (small, since we bbox-prefilter
+        and then exact-filter in Python). Pagination just slices it.
+        """
+        dlat = radius_km / 111.32
+        dlon = radius_km / (111.32 * max(math.cos(math.radians(lat)), 1e-6))
+        lat_min, lat_max = lat - dlat, lat + dlat
+        lon_min, lon_max = lon - dlon, lon + dlon
+
+        rows = conn.execute(
+            """SELECT f.id, f.path, f.content_hash,
+                      pm.taken_at, pm.camera_model, pm.city, pm.country,
+                      pm.lat, pm.lon
+               FROM photo_meta pm
+               JOIN files f ON f.id = pm.file_id
+               WHERE pm.lat BETWEEN ? AND ?
+                 AND pm.lon BETWEEN ? AND ?
+                 AND f.missing = 0""",
+            (lat_min, lat_max, lon_min, lon_max),
+        ).fetchall()
+
+        R = 6371.0  # km
+        lat_r = math.radians(lat)
+        scored: list[tuple[float, dict]] = []
+        for r in rows:
+            plat_r = math.radians(r["lat"])
+            plon_r = math.radians(r["lon"])
+            dph = plat_r - lat_r
+            dlh = plon_r - math.radians(lon)
+            a = math.sin(dph / 2) ** 2 + math.cos(lat_r) * math.cos(plat_r) * math.sin(dlh / 2) ** 2
+            dist = 2 * R * math.asin(min(1.0, math.sqrt(a)))
+            if dist <= radius_km:
+                scored.append((dist, dict(r)))
+        scored.sort(key=lambda x: x[0])
+        return scored
+
     @app.get("/nearby", response_class=HTMLResponse)
     async def nearby_page(
         request: Request,
@@ -1163,47 +1249,14 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         """Photos within *radius_km* of (lat, lon), nearest first."""
         conn = get_conn()
         try:
-            per_page = 60
-            # Bounding-box pre-filter so the index is used; haversine refines.
-            # 1 deg lat ≈ 111.32 km; 1 deg lon ≈ 111.32*cos(lat) km.
-            dlat = radius_km / 111.32
-            dlon = radius_km / (111.32 * max(math.cos(math.radians(lat)), 1e-6))
-            lat_min, lat_max = lat - dlat, lat + dlat
-            lon_min, lon_max = lon - dlon, lon + dlon
-
-            rows = conn.execute(
-                """SELECT f.id, f.path, f.content_hash,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country,
-                          pm.lat, pm.lon
-                   FROM photo_meta pm
-                   JOIN files f ON f.id = pm.file_id
-                   WHERE pm.lat BETWEEN ? AND ?
-                     AND pm.lon BETWEEN ? AND ?
-                     AND f.missing = 0""",
-                (lat_min, lat_max, lon_min, lon_max),
-            ).fetchall()
-
-            # Exact haversine; filter + sort in Python (small result set).
-            R = 6371.0  # km
-            lat_r = math.radians(lat)
-            lon_r = math.radians(lon)
-            scored: list[tuple[float, dict]] = []
-            for r in rows:
-                plat_r = math.radians(r["lat"])
-                plon_r = math.radians(r["lon"])
-                dph = plat_r - lat_r
-                dlh = plon_r - lon_r
-                a = math.sin(dph / 2) ** 2 + math.cos(lat_r) * math.cos(plat_r) * math.sin(dlh / 2) ** 2
-                dist = 2 * R * math.asin(min(1.0, math.sqrt(a)))
-                if dist <= radius_km:
-                    scored.append((dist, dict(r)))
-            scored.sort(key=lambda x: x[0])
-
+            scored = _nearby_scored(conn, lat, lon, radius_km)
             total = len(scored)
-            offset = page * per_page
-            window = scored[offset:offset + per_page]
+            # Initial render loads pages 0..page inclusive so a back-button
+            # restore brings back the same scroll height.
+            load_count = (page + 1) * NEARBY_PER_PAGE
+            window = scored[:load_count]
             photos = [dict(d, distance_km=dist) for dist, d in window]
-            has_next = offset + per_page < total
+            has_next = load_count < total
 
             return TEMPLATES.TemplateResponse(request, "nearby.html", {
                 "photos": photos,
@@ -1214,6 +1267,37 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
             })
+        finally:
+            conn.close()
+
+    @app.get("/nearby-page", response_class=HTMLResponse)
+    async def nearby_page_partial(
+        request: Request,
+        lat: float = Query(...),
+        lon: float = Query(...),
+        radius_km: float = Query(5.0, gt=0, le=20000),
+        page: int = Query(0, ge=0),
+    ):
+        """htmx partial: next page of the nearby photo grid."""
+        conn = get_conn()
+        try:
+            scored = _nearby_scored(conn, lat, lon, radius_km)
+            total = len(scored)
+            offset = page * NEARBY_PER_PAGE
+            window = scored[offset:offset + NEARBY_PER_PAGE]
+            photos = [dict(d, distance_km=dist) for dist, d in window]
+            has_next = offset + NEARBY_PER_PAGE < total
+            return TEMPLATES.TemplateResponse(
+                request, "_nearby_grid.html",
+                {
+                    "photos": photos,
+                    "lat": lat,
+                    "lon": lon,
+                    "radius_km": radius_km,
+                    "page": page,
+                    "has_next": has_next,
+                },
+            )
         finally:
             conn.close()
 
