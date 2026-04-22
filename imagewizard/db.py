@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -119,6 +119,31 @@ CREATE TABLE IF NOT EXISTS app_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Person identity (one per real-world person). Unlike `face_clusters`
+-- which is an HDBSCAN artefact, a person is an editable identity that
+-- can span multiple clusters and carry multiple names over time
+-- (married name change, nickname, etc.).
+CREATE TABLE IF NOT EXISTS persons (
+    id           INTEGER PRIMARY KEY,
+    primary_name TEXT NOT NULL,
+    notes        TEXT,
+    created_at   REAL NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+-- Name epochs: a person was called <name> from start_date to end_date.
+-- Either bound may be NULL (open-ended). When a face's photo date falls
+-- inside an epoch, that's the name shown for the face.
+CREATE TABLE IF NOT EXISTS person_names (
+    id          INTEGER PRIMARY KEY,
+    person_id   INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    start_date  TEXT,    -- "YYYY-MM-DD" or NULL = open
+    end_date    TEXT,    -- "YYYY-MM-DD" or NULL = ongoing
+    is_nickname INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pn_person ON person_names(person_id);
+CREATE INDEX IF NOT EXISTS idx_pn_name   ON person_names(name COLLATE NOCASE);
 """
 
 
@@ -138,16 +163,70 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def init(db_path: Path) -> None:
-    """Create schema if missing and stamp the version."""
+    """Create schema if missing, run additive migrations, and backfill."""
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA_SQL)
+        _migrate(conn)
+        _backfill_persons(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES (?)",
             (SCHEMA_VERSION,),
         )
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent additive migrations (only ADD COLUMN, never drop)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(face_clusters)")}
+    if "person_id" not in cols:
+        conn.execute(
+            "ALTER TABLE face_clusters ADD COLUMN person_id INTEGER"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fc_person ON face_clusters(person_id)"
+        )
+
+
+def _backfill_persons(conn: sqlite3.Connection) -> None:
+    """For each existing distinct person_name on face_clusters, create one
+    persons row + one open-ended person_names row, and link the cluster.
+
+    Idempotent: skips clusters that already have a person_id set, and
+    reuses an existing person if one with the same primary_name exists.
+    """
+    rows = conn.execute(
+        """SELECT cluster_id, person_name FROM face_clusters
+           WHERE person_name IS NOT NULL
+             AND person_name != ''
+             AND person_id IS NULL"""
+    ).fetchall()
+    if not rows:
+        return
+
+    for r in rows:
+        cid, name = r[0], r[1]
+        # Reuse a person with this name if one already exists
+        existing = conn.execute(
+            "SELECT id FROM persons WHERE primary_name = ? COLLATE NOCASE LIMIT 1",
+            (name,),
+        ).fetchone()
+        if existing:
+            pid = existing[0]
+        else:
+            cur = conn.execute(
+                "INSERT INTO persons (primary_name) VALUES (?)", (name,)
+            )
+            pid = cur.lastrowid
+            conn.execute(
+                "INSERT INTO person_names (person_id, name) VALUES (?, ?)",
+                (pid, name),
+            )
+        conn.execute(
+            "UPDATE face_clusters SET person_id = ? WHERE cluster_id = ?",
+            (pid, cid),
+        )
 
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:

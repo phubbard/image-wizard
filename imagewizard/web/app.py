@@ -207,32 +207,51 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
     PERSON_PER_PAGE = 60
 
-    def _person_photos(conn, person: str, limit: int, offset: int):
+    def _person_photos(conn, person_id: int, limit: int, offset: int):
+        """All photos containing any face linked (via cluster) to this person.
+
+        Aggregates across every cluster owned by the person, so historical
+        names + multi-cluster splits collapse into one timeline.
+        """
         return conn.execute(
             """SELECT f.id, f.path, f.content_hash,
                       pm.taken_at, pm.camera_model, pm.city, pm.country
                FROM (
                    SELECT DISTINCT fa.file_id AS fid
                    FROM faces fa
+                   JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                    JOIN files ff ON ff.id = fa.file_id
-                   WHERE fa.person_name = ? AND ff.missing = 0
+                   WHERE fc.person_id = ? AND ff.missing = 0
                ) t
                JOIN files f ON f.id = t.fid
                LEFT JOIN photo_meta pm ON pm.file_id = f.id
                ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
                LIMIT ? OFFSET ?""",
-            (person, limit, offset),
+            (person_id, limit, offset),
         ).fetchall()
 
-    def _person_total(conn, person: str) -> int:
+    def _person_total(conn, person_id: int) -> int:
         row = conn.execute(
             """SELECT COUNT(DISTINCT fa.file_id)
                FROM faces fa
+               JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                JOIN files f ON f.id = fa.file_id
-               WHERE fa.person_name = ? AND f.missing = 0""",
-            (person,),
+               WHERE fc.person_id = ? AND f.missing = 0""",
+            (person_id,),
         ).fetchone()
         return row[0] if row else 0
+
+    def _resolve_person_or_404(conn, name: str):
+        """Look up a person by any historical name. Returns ``(person_row,
+        None)`` on success or ``(None, HTMLResponse(404))`` if unknown."""
+        from .. import persons as persons_mod
+        pid = persons_mod.find_person_by_name(conn, name)
+        if pid is None:
+            return None, HTMLResponse(f"No person named '{name}'.", 404)
+        p = persons_mod.get_person(conn, pid)
+        if p is None:
+            return None, HTMLResponse(f"No person named '{name}'.", 404)
+        return p, None
 
     @app.get("/person/{name}", response_class=HTMLResponse)
     async def person_detail(
@@ -241,10 +260,18 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         page: int = Query(0, ge=0),
     ):
         from urllib.parse import unquote
-        person = unquote(name)
+        from .. import persons as persons_mod
+
+        spec = unquote(name)
         conn = get_conn()
         try:
-            # Aggregate stats across every cluster with this person_name.
+            p, err = _resolve_person_or_404(conn, spec)
+            if err:
+                return err
+            person_id = p["id"]
+            primary_name = p["primary_name"]
+
+            # Aggregate stats across every cluster owned by this person.
             stats = conn.execute(
                 """SELECT COUNT(DISTINCT fa.file_id) AS n_photos,
                           COUNT(*)                    AS n_faces,
@@ -252,51 +279,160 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                           MIN(pm.taken_at)            AS first_date,
                           MAX(pm.taken_at)            AS last_date
                    FROM faces fa
+                   JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                    JOIN files f ON f.id = fa.file_id
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE fa.person_name = ? AND f.missing = 0""",
-                (person,),
+                   WHERE fc.person_id = ? AND f.missing = 0""",
+                (person_id,),
             ).fetchone()
 
             if not stats or not stats["n_photos"]:
-                return HTMLResponse(f"No photos found for '{person}'.", 404)
+                return HTMLResponse(
+                    f"'{primary_name}' has no photos yet.", 404
+                )
 
             # "Through the years": best face per calendar year.
-            # ROW_NUMBER() picks the highest-confidence face per year.
             year_faces = conn.execute(
-                """SELECT yr, face_id, file_id, content_hash FROM (
+                """SELECT yr, face_id, file_id, content_hash, person_name
+                   FROM (
                        SELECT SUBSTR(pm.taken_at, 1, 4) AS yr,
                               fa.id          AS face_id,
                               fa.file_id     AS file_id,
                               f.content_hash AS content_hash,
+                              fa.person_name AS person_name,
                               ROW_NUMBER() OVER (
                                   PARTITION BY SUBSTR(pm.taken_at, 1, 4)
                                   ORDER BY fa.det_score DESC, fa.id
                               ) AS rn
                        FROM faces fa
+                       JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                        JOIN files f ON f.id = fa.file_id
                        JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE fa.person_name = ? AND f.missing = 0
+                       WHERE fc.person_id = ? AND f.missing = 0
                          AND pm.taken_at IS NOT NULL
                          AND LENGTH(pm.taken_at) >= 4
                    )
                    WHERE rn = 1
                    ORDER BY yr""",
-                (person,),
+                (person_id,),
             ).fetchall()
 
-            # First page of photos.
-            photos = _person_photos(conn, person, PERSON_PER_PAGE, 0)
+            epochs = persons_mod.list_name_epochs(conn, person_id)
+            photos = _person_photos(conn, person_id, PERSON_PER_PAGE, 0)
             has_next = PERSON_PER_PAGE < stats["n_photos"]
 
             return TEMPLATES.TemplateResponse(request, "person.html", {
-                "person": person,
+                "person": primary_name,
+                "person_id": person_id,
+                "epochs": epochs,
                 "stats": stats,
                 "year_faces": year_faces,
                 "photos": photos,
                 "page": 0,
                 "has_next": has_next,
             })
+        finally:
+            conn.close()
+
+    @app.post("/person/{name}/add-name")
+    async def person_add_name(name: str, request: Request):
+        from urllib.parse import unquote
+        from .. import persons as persons_mod
+        spec = unquote(name)
+        form = await request.form()
+        new_name = (form.get("name") or "").strip()
+        start = (form.get("start_date") or "").strip() or None
+        end = (form.get("end_date") or "").strip() or None
+        if not new_name:
+            return RedirectResponse(f"/person/{name}", status_code=303)
+        conn = get_conn()
+        try:
+            pid = persons_mod.find_person_by_name(conn, spec)
+            if pid is None:
+                return HTMLResponse(f"No person named '{spec}'.", 404)
+            conn.execute("BEGIN")
+            try:
+                persons_mod.add_name_epoch(
+                    conn, pid, new_name, start, end
+                )
+                # Adding an epoch may shift which name is canonical for
+                # which date. Refresh the per-face cache.
+                persons_mod.refresh_face_names_for_person(conn, pid)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            # The person's primary_name might still be the old value;
+            # redirect to whatever name still resolves to this person.
+            p = persons_mod.get_person(conn, pid)
+            from urllib.parse import quote
+            return RedirectResponse(
+                f"/person/{quote(p['primary_name'])}", status_code=303
+            )
+        finally:
+            conn.close()
+
+    @app.post("/person/{name}/delete-name/{epoch_id}")
+    async def person_delete_name(name: str, epoch_id: int):
+        from urllib.parse import unquote, quote
+        from .. import persons as persons_mod
+        spec = unquote(name)
+        conn = get_conn()
+        try:
+            pid = persons_mod.find_person_by_name(conn, spec)
+            if pid is None:
+                return HTMLResponse(f"No person named '{spec}'.", 404)
+            conn.execute("BEGIN")
+            try:
+                try:
+                    persons_mod.delete_name_epoch(conn, pid, epoch_id)
+                except ValueError:
+                    # Last epoch — refuse, the person needs at least one name.
+                    conn.execute("ROLLBACK")
+                    return RedirectResponse(
+                        f"/person/{name}", status_code=303
+                    )
+                persons_mod.refresh_face_names_for_person(conn, pid)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            p = persons_mod.get_person(conn, pid)
+            return RedirectResponse(
+                f"/person/{quote(p['primary_name'])}", status_code=303
+            )
+        finally:
+            conn.close()
+
+    @app.post("/person/{name}/set-primary/{epoch_id}")
+    async def person_set_primary(name: str, epoch_id: int):
+        """Promote an epoch's name to be the person's primary_name (the
+        fallback used when a photo has no date)."""
+        from urllib.parse import unquote, quote
+        from .. import persons as persons_mod
+        spec = unquote(name)
+        conn = get_conn()
+        try:
+            pid = persons_mod.find_person_by_name(conn, spec)
+            if pid is None:
+                return HTMLResponse(f"No person named '{spec}'.", 404)
+            row = conn.execute(
+                "SELECT name FROM person_names WHERE id = ? AND person_id = ?",
+                (epoch_id, pid),
+            ).fetchone()
+            if not row:
+                return RedirectResponse(f"/person/{name}", status_code=303)
+            conn.execute("BEGIN")
+            try:
+                persons_mod.set_primary_name(conn, pid, row["name"])
+                persons_mod.refresh_face_names_for_person(conn, pid)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            return RedirectResponse(
+                f"/person/{quote(row['name'])}", status_code=303
+            )
         finally:
             conn.close()
 
@@ -308,19 +444,23 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     ):
         """htmx partial: next page of a person's photo grid."""
         from urllib.parse import unquote
-        person = unquote(name)
+        from .. import persons as persons_mod
+        spec = unquote(name)
         conn = get_conn()
         try:
+            pid = persons_mod.find_person_by_name(conn, spec)
+            if pid is None:
+                return HTMLResponse("", 404)
             offset = page * PERSON_PER_PAGE
-            photos = _person_photos(conn, person, PERSON_PER_PAGE, offset)
-            total = _person_total(conn, person)
+            photos = _person_photos(conn, pid, PERSON_PER_PAGE, offset)
+            total = _person_total(conn, pid)
             has_next = offset + PERSON_PER_PAGE < total
             return TEMPLATES.TemplateResponse(
                 request,
                 "_person_photo_grid.html",
                 {
                     "photos": photos,
-                    "person": person,
+                    "person": spec,
                     "page": page,
                     "has_next": has_next,
                 },
@@ -631,16 +771,9 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         return rows, total, has_next
 
     def _all_people(conn) -> list[str]:
-        """List of distinct person names (for server-rendered autocomplete)."""
-        return [
-            r["name"]
-            for r in conn.execute(
-                """SELECT DISTINCT person_name AS name
-                   FROM faces
-                   WHERE person_name IS NOT NULL AND person_name != ''
-                   ORDER BY person_name COLLATE NOCASE"""
-            ).fetchall()
-        ]
+        """All known names (every epoch of every person) for autocomplete."""
+        from .. import persons as persons_mod
+        return persons_mod.all_known_names(conn)
 
     @app.get("/faces", response_class=HTMLResponse)
     async def faces_page(request: Request, page: int = Query(0, ge=0)):
@@ -672,56 +805,34 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             conn.close()
 
     def _apply_cluster_name(conn, cluster_id: int, name: str) -> int:
-        """Assign `name` to cluster_id, auto-merging into an existing cluster
-        with the same name if one exists.
+        """Assign ``name`` to ``cluster_id``, routing through the persons
+        identity model.
 
-        Returns the surviving cluster_id (may equal cluster_id, or the
-        cluster_id that absorbed this one). This is the single source of
-        truth for "user typed a name for a cluster" — called from both
-        the Faces page form and the photo-detail face popover, so typing
-        "Alice" a second time always unifies clusters instead of spawning
-        duplicates.
+        Behaviour:
+        * If the typed name resolves (via any name epoch) to an existing
+          person, the cluster joins that person — multiple clusters can
+          belong to one identity (e.g. kids aging into a different
+          HDBSCAN cluster).
+        * If no person matches, a new person is created with this name as
+          its sole open-ended epoch.
+        * Either way, ``faces.person_name`` for every face in this cluster
+          is recomputed to the date-appropriate name from the person's
+          epochs.
+
+        Returns the cluster_id (always unchanged — clusters are no longer
+        merged at this layer; identity unification happens via persons).
         """
-        # Case-insensitive match on an *other* cluster that already carries
-        # this name. We keep the older (lower cluster_id) so IDs stay stable
-        # in bookmarks / URLs.
-        existing = conn.execute(
-            """SELECT cluster_id FROM face_clusters
-               WHERE person_name = ? COLLATE NOCASE
-                 AND cluster_id != ?
-               ORDER BY cluster_id
-               LIMIT 1""",
-            (name, cluster_id),
-        ).fetchone()
+        from .. import persons as persons_mod
 
-        if existing:
-            keeper = existing["cluster_id"]
-            # Merge cluster_id into keeper.
-            conn.execute(
-                "UPDATE faces SET cluster_id=?, person_name=? WHERE cluster_id=?",
-                (keeper, name, cluster_id),
-            )
-            conn.execute(
-                "DELETE FROM face_clusters WHERE cluster_id=?", (cluster_id,)
-            )
-            new_count = conn.execute(
-                "SELECT COUNT(*) FROM faces WHERE cluster_id=?", (keeper,)
-            ).fetchone()[0]
-            conn.execute(
-                "UPDATE face_clusters SET person_name=?, face_count=? WHERE cluster_id=?",
-                (name, new_count, keeper),
-            )
-            return keeper
-
-        # No collision — plain rename.
+        person_id = persons_mod.get_or_create_person(conn, name)
+        # Cache primary_name on the cluster so legacy queries still work.
+        primary = persons_mod.get_person(conn, person_id)["primary_name"]
         conn.execute(
-            "UPDATE face_clusters SET person_name=? WHERE cluster_id=?",
-            (name, cluster_id),
+            "UPDATE face_clusters SET person_id=?, person_name=? WHERE cluster_id=?",
+            (person_id, primary, cluster_id),
         )
-        conn.execute(
-            "UPDATE faces SET person_name=? WHERE cluster_id=?",
-            (name, cluster_id),
-        )
+        # Recompute per-face cached names using each face's own taken_at.
+        persons_mod.refresh_face_names_for_person(conn, person_id)
         return cluster_id
 
     @app.get("/api/people.json")

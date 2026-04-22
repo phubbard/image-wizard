@@ -1,6 +1,46 @@
 {% extends "base.html" %}
 {% block title_extra %} — {{ person }}{% endblock %}
 
+{% block head_extra %}
+<style>
+    .epoch-row {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr 1fr auto auto;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.4rem 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.9rem;
+    }
+    .epoch-row:last-child { border-bottom: none; }
+    .epoch-row .name { font-weight: 600; }
+    .epoch-row .meta { color: var(--muted); font-size: 0.8rem; }
+    .epoch-row form { margin: 0; display: inline; }
+    .epoch-row .btn-link {
+        background: none;
+        border: 1px solid var(--border);
+        color: var(--fg);
+        font-size: 0.75rem;
+        padding: 0.2rem 0.5rem;
+        cursor: pointer;
+    }
+    .epoch-row .btn-link.danger { color: var(--highlight); border-color: var(--highlight); }
+    .add-epoch {
+        margin-top: 0.6rem;
+        padding: 0.6rem;
+        background: var(--card);
+        border-radius: 6px;
+        display: grid;
+        grid-template-columns: 1.4fr 1fr 1fr auto;
+        gap: 0.5rem;
+        align-items: end;
+    }
+    .add-epoch label { display: flex; flex-direction: column; font-size: 0.75rem; color: var(--muted); }
+    .add-epoch input { margin-top: 0.2rem; }
+    .epoch-table { background: var(--card); padding: 0.4rem 0.8rem; border-radius: 6px; }
+</style>
+{% endblock %}
+
 {% block content %}
 <h1>{{ person }}</h1>
 
@@ -15,8 +55,67 @@
     {% endif %}
 </div>
 
+<h2 style="margin-top:1.2rem;">Names through time</h2>
+<div class="epoch-table">
+    {% for ep in epochs %}
+    <div class="epoch-row">
+        <div>
+            <span class="name">{{ ep['name'] }}</span>
+            {% if ep['name'] == person %}
+                <span class="meta">· primary</span>
+            {% endif %}
+            {% if ep['is_nickname'] %}
+                <span class="meta">· nickname</span>
+            {% endif %}
+        </div>
+        <div class="meta">
+            from {{ ep['start_date'] or '—' }}
+        </div>
+        <div class="meta">
+            until {{ ep['end_date'] or 'ongoing' }}
+        </div>
+        {% if ep['name'] != person %}
+        <form method="post" action="/person/{{ person|urlencode }}/set-primary/{{ ep['id'] }}">
+            <button class="btn-link" type="submit"
+                    title="Make this the primary name shown when no date applies">
+                make primary
+            </button>
+        </form>
+        {% else %}
+        <span></span>
+        {% endif %}
+        {% if epochs|length > 1 %}
+        <form method="post" action="/person/{{ person|urlencode }}/delete-name/{{ ep['id'] }}"
+              onsubmit="return confirm('Delete the name &quot;{{ ep['name'] }}&quot;?');">
+            <button class="btn-link danger" type="submit">delete</button>
+        </form>
+        {% else %}
+        <span></span>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+<form class="add-epoch" method="post" action="/person/{{ person|urlencode }}/add-name">
+    <label>Name
+        <input type="text" name="name" required
+               placeholder="e.g. Amy Bee">
+    </label>
+    <label>From (YYYY-MM-DD, optional)
+        <input type="date" name="start_date">
+    </label>
+    <label>Until (YYYY-MM-DD, optional)
+        <input type="date" name="end_date">
+    </label>
+    <button type="submit">Add name</button>
+</form>
+<p class="meta" style="font-size:0.75rem;color:var(--muted);margin-top:0.4rem;">
+    Adding a name that's already used by another person will merge that person into this one.
+    Each photo's caption uses the name in effect on that photo's date.
+</p>
+
 {% if year_faces %}
-<h2 style="margin-top:1rem;">Through the years</h2>
+<h2 style="margin-top:1.4rem;">Through the years</h2>
 <div style="display:flex;gap:0.5rem;overflow-x:auto;padding:0.5rem 0 1rem;">
     {% for yf in year_faces %}
     <a href="/photo/{{ yf['file_id'] }}"
@@ -25,6 +124,9 @@
              alt="{{ yf['yr'] }}"
              style="width:110px;height:110px;object-fit:cover;border-radius:6px;display:block;">
         <div style="font-size:0.8rem;margin-top:0.25rem;">{{ yf['yr'] }}</div>
+        {% if yf['person_name'] and yf['person_name'] != person %}
+        <div style="font-size:0.7rem;color:var(--muted);">{{ yf['person_name'] }}</div>
+        {% endif %}
     </a>
     {% endfor %}
 </div>
