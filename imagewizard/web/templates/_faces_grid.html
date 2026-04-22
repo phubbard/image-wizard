@@ -19,7 +19,8 @@
         {% endif %}
     </div>
     <form method="post" action="/faces/{{ c['cluster_id'] }}/name">
-        <input type="text" name="name" placeholder="{{ c['person_name'] or 'Name this person' }}"
+        <input type="text" name="name" list="people-list" autocomplete="off"
+               placeholder="{{ c['person_name'] or 'Name this person' }}"
                value="{{ c['person_name'] or '' }}">
         <button type="submit" style="font-size:0.75rem;padding:0.2rem 0.5rem;">Save</button>
     </form>

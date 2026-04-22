@@ -286,6 +286,30 @@ function closePopover() {
     document.querySelectorAll('.bbox.face.active').forEach(b => b.classList.remove('active'));
 }
 
+// Shared autocomplete + "will merge" hint data, fetched once per page.
+// peopleNames is populated before any popover opens (promise-gated by
+// awaiting inside the click handler is overkill — the fetch is fast and
+// a popover opened before it resolves just has no suggestions).
+const peopleNames = new Set();
+(function loadPeople() {
+    let dl = document.getElementById('people-list');
+    if (!dl) {
+        dl = document.createElement('datalist');
+        dl.id = 'people-list';
+        document.body.appendChild(dl);
+    }
+    fetch('/api/people.json').then(r => r.json()).then(people => {
+        dl.innerHTML = '';
+        people.forEach(p => {
+            peopleNames.add(p.name.toLowerCase());
+            const opt = document.createElement('option');
+            opt.value = p.name;
+            opt.label = p.count + ' photo' + (p.count === 1 ? '' : 's');
+            dl.appendChild(opt);
+        });
+    });
+})();
+
 // Face bbox click → inline name popover
 document.querySelectorAll('.bbox.face').forEach(el => {
     el.addEventListener('click', function(e) {
@@ -301,13 +325,25 @@ document.querySelectorAll('.bbox.face').forEach(el => {
         const pop = document.createElement('div');
         pop.className = 'face-popover';
         pop.innerHTML = `
-            <input type="text" placeholder="Name this person" value="${currentName}">
+            <input type="text" placeholder="Name this person" list="people-list"
+                   autocomplete="off" value="${currentName}">
             <button class="save-btn">Save</button>
             <button class="cancel-btn">×</button>
+            <div class="merge-hint" style="font-size:0.7rem;color:#f7b731;width:100%;margin-top:0.2rem;min-height:1em;"></div>
         `;
         this.appendChild(pop);
 
         const input = pop.querySelector('input');
+        const hint = pop.querySelector('.merge-hint');
+        const ownName = (currentName || '').trim().toLowerCase();
+        input.addEventListener('input', () => {
+            const v = input.value.trim().toLowerCase();
+            if (v && v !== ownName && peopleNames.has(v)) {
+                hint.textContent = '↳ will merge into existing "' + input.value.trim() + '"';
+            } else {
+                hint.textContent = '';
+            }
+        });
         input.focus();
         input.select();
 

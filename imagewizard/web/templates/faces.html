@@ -51,11 +51,19 @@
 {% endblock %}
 {% block content %}
 <h1>Face Clusters</h1>
-<div class="stats-bar">{{ total }} clusters</div>
+<div class="stats-bar">
+    {{ total }} clusters
+    · <span style="color:var(--muted);">typing an existing name auto-merges clusters</span>
+</div>
+
+{# Shared autocomplete source — populated from /api/people.json. Each
+   cluster's <input> and the merge bar both reference list="people-list". #}
+<datalist id="people-list"></datalist>
 
 <div class="merge-bar" id="merge-bar">
     <span class="count" id="merge-count">0 selected</span>
-    <input type="text" id="merge-name" placeholder="Person name for merged cluster">
+    <input type="text" id="merge-name" list="people-list"
+           placeholder="Person name for merged cluster" autocomplete="off">
     <button id="merge-btn">Merge</button>
     <button class="cancel-btn" id="merge-cancel">Cancel</button>
 </div>
@@ -66,6 +74,49 @@
 </div>
 <script>
 if (history.scrollRestoration) history.scrollRestoration = 'auto';
+
+// --- Autocomplete: fetch existing people once and populate the shared
+// <datalist>. Each cluster's name input (see _faces_grid.html) has
+// list="people-list", so the browser surfaces these as suggestions.
+// We also keep a Set of lower-cased names so we can show a "will merge"
+// hint next to the Save button when the user types an existing name.
+const peopleNames = new Set();
+fetch('/api/people.json').then(r => r.json()).then(people => {
+    const dl = document.getElementById('people-list');
+    dl.innerHTML = '';
+    people.forEach(p => {
+        peopleNames.add(p.name.toLowerCase());
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.label = p.count + ' photo' + (p.count === 1 ? '' : 's');
+        dl.appendChild(opt);
+    });
+    // Attach live "will merge" hints now that we know the name set.
+    document.querySelectorAll('.face-card').forEach(attachMergeHint);
+});
+
+function attachMergeHint(card) {
+    const input = card.querySelector('input[name=name]');
+    if (!input || input.dataset.hintAttached) return;
+    input.dataset.hintAttached = '1';
+    const ownName = (input.value || '').trim().toLowerCase();
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:0.7rem;color:#f7b731;margin-top:0.2rem;min-height:1em;';
+    input.parentElement.appendChild(hint);
+    input.addEventListener('input', () => {
+        const v = input.value.trim().toLowerCase();
+        if (v && v !== ownName && peopleNames.has(v)) {
+            hint.textContent = '↳ will merge into existing "' + input.value.trim() + '"';
+        } else {
+            hint.textContent = '';
+        }
+    });
+}
+
+// Re-apply merge hints after htmx swaps in the next page of cards.
+document.body.addEventListener('htmx:afterSwap', () => {
+    document.querySelectorAll('.face-card').forEach(attachMergeHint);
+});
 
 // --- Merge UI ---
 const selected = new Set();

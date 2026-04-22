@@ -657,6 +657,79 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    def _apply_cluster_name(conn, cluster_id: int, name: str) -> int:
+        """Assign `name` to cluster_id, auto-merging into an existing cluster
+        with the same name if one exists.
+
+        Returns the surviving cluster_id (may equal cluster_id, or the
+        cluster_id that absorbed this one). This is the single source of
+        truth for "user typed a name for a cluster" — called from both
+        the Faces page form and the photo-detail face popover, so typing
+        "Alice" a second time always unifies clusters instead of spawning
+        duplicates.
+        """
+        # Case-insensitive match on an *other* cluster that already carries
+        # this name. We keep the older (lower cluster_id) so IDs stay stable
+        # in bookmarks / URLs.
+        existing = conn.execute(
+            """SELECT cluster_id FROM face_clusters
+               WHERE person_name = ? COLLATE NOCASE
+                 AND cluster_id != ?
+               ORDER BY cluster_id
+               LIMIT 1""",
+            (name, cluster_id),
+        ).fetchone()
+
+        if existing:
+            keeper = existing["cluster_id"]
+            # Merge cluster_id into keeper.
+            conn.execute(
+                "UPDATE faces SET cluster_id=?, person_name=? WHERE cluster_id=?",
+                (keeper, name, cluster_id),
+            )
+            conn.execute(
+                "DELETE FROM face_clusters WHERE cluster_id=?", (cluster_id,)
+            )
+            new_count = conn.execute(
+                "SELECT COUNT(*) FROM faces WHERE cluster_id=?", (keeper,)
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE face_clusters SET person_name=?, face_count=? WHERE cluster_id=?",
+                (name, new_count, keeper),
+            )
+            return keeper
+
+        # No collision — plain rename.
+        conn.execute(
+            "UPDATE face_clusters SET person_name=? WHERE cluster_id=?",
+            (name, cluster_id),
+        )
+        conn.execute(
+            "UPDATE faces SET person_name=? WHERE cluster_id=?",
+            (name, cluster_id),
+        )
+        return cluster_id
+
+    @app.get("/api/people.json")
+    async def api_people():
+        """JSON list of known people for autocomplete.
+
+        Shape: `[{"name": "Alice", "count": 42}, ...]`, sorted by count desc
+        so common names appear first in the datalist.
+        """
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT person_name AS name, COUNT(*) AS count
+                   FROM faces
+                   WHERE person_name IS NOT NULL AND person_name != ''
+                   GROUP BY person_name
+                   ORDER BY count DESC"""
+            ).fetchall()
+            return [{"name": r["name"], "count": r["count"]} for r in rows]
+        finally:
+            conn.close()
+
     @app.post("/faces/{cluster_id}/name")
     async def name_face(cluster_id: int, request: Request):
         form = await request.form()
@@ -665,21 +738,15 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return RedirectResponse("/faces", status_code=303)
         conn = get_conn()
         try:
-            conn.execute(
-                "UPDATE face_clusters SET person_name=? WHERE cluster_id=?",
-                (name, cluster_id),
-            )
-            conn.execute(
-                "UPDATE faces SET person_name=? WHERE cluster_id=?",
-                (name, cluster_id),
-            )
+            _apply_cluster_name(conn, cluster_id, name)
         finally:
             conn.close()
         return RedirectResponse("/faces", status_code=303)
 
     @app.post("/face/{face_id}/name")
     async def name_single_face(face_id: int, request: Request):
-        """Name a single face and propagate to its cluster."""
+        """Name a single face and propagate to its cluster, auto-merging
+        into an existing same-named cluster if one exists."""
         form = await request.form()
         name = form.get("name", "").strip()
         file_id = form.get("file_id", "")
@@ -687,24 +754,15 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return RedirectResponse(f"/photo/{file_id}", status_code=303)
         conn = get_conn()
         try:
-            # Update this face
+            # Name this specific face first (covers the unclustered case).
             conn.execute(
                 "UPDATE faces SET person_name=? WHERE id=?", (name, face_id)
             )
-            # If it belongs to a cluster, propagate name to the whole cluster
             row = conn.execute(
                 "SELECT cluster_id FROM faces WHERE id=?", (face_id,)
             ).fetchone()
             if row and row["cluster_id"] is not None:
-                cid = row["cluster_id"]
-                conn.execute(
-                    "UPDATE faces SET person_name=? WHERE cluster_id=?",
-                    (name, cid),
-                )
-                conn.execute(
-                    "UPDATE face_clusters SET person_name=? WHERE cluster_id=?",
-                    (name, cid),
-                )
+                _apply_cluster_name(conn, row["cluster_id"], name)
         finally:
             conn.close()
         return RedirectResponse(f"/photo/{file_id}", status_code=303)
