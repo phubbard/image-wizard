@@ -63,6 +63,14 @@
             object-fit: cover;
             border-radius: 4px;
             display: block;
+            /* Resilience against thumb 404s / decode errors: a solid
+               placeholder square keeps the grid uniform, and the
+               transparent text colour hides the broken-image alt text
+               that browsers render inside failed <img> elements
+               (screen readers still get the alt attribute). */
+            background: var(--card);
+            color: transparent;
+            font-size: 0;
         }
         .grid .caption {
             position: absolute;

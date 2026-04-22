@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import math
 import struct
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _fmt_bytes(n: int) -> str:
@@ -1042,21 +1045,27 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return []  # one physical lens — no pill row needed
 
         # Rank back-camera groups by focal length for relative labels.
+        # Goal: every pill gets a *unique* short label (the focal length
+        # is also shown, but the position word is the at-a-glance hint).
         back_sorted = sorted(
             [g for k, g in groups.items() if k[0] == "back" and g["focal"]],
             key=lambda g: g["focal"],
         )
-        position_label = {}
-        if len(back_sorted) == 1:
-            position_label[id(back_sorted[0])] = "Main"
-        elif len(back_sorted) == 2:
-            position_label[id(back_sorted[0])] = "Wide"
-            position_label[id(back_sorted[1])] = "Tele"
-        elif len(back_sorted) >= 3:
-            position_label[id(back_sorted[0])] = "Ultra wide"
-            position_label[id(back_sorted[-1])] = "Telephoto"
-            for g in back_sorted[1:-1]:
-                position_label[id(g)] = "Main"
+        N = len(back_sorted)
+        if N == 1:
+            label_seq = ["Main"]
+        elif N == 2:
+            label_seq = ["Wide", "Tele"]
+        elif N == 3:
+            label_seq = ["Ultra wide", "Main", "Telephoto"]
+        elif N == 4:
+            label_seq = ["Ultra wide", "Main", "Tele", "Telephoto"]
+        else:
+            # 5+: keep the extremes named, fall back to focal length only
+            # for the middle (no position word — the focal length is the
+            # disambiguator). This avoids "Main / Main / Main".
+            label_seq = ["Ultra wide"] + [""] * (N - 2) + ["Telephoto"]
+        position_label = {id(g): lbl for g, lbl in zip(back_sorted, label_seq)}
 
         out: list[dict] = []
         # Sort: back lenses first (by focal asc), then front, then unknown.
@@ -1392,10 +1401,45 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
     @app.get("/thumb/{content_hash}")
     async def serve_thumb(content_hash: str):
+        """Serve a 512px thumbnail, generating + caching on demand.
+
+        Older photos (and photos from machines that haven't run
+        `index --thumbs` yet) may have no cached thumb. Rather than
+        404'ing — which produces the broken-image-with-alt-text mess on
+        grid pages — we look up the source file by content_hash, decode
+        it, write the thumb to the cache, then serve it. Subsequent
+        requests hit the cache.
+        """
         p = thumb_path(cfg.cache_dir, content_hash)
         if p.exists():
             return FileResponse(p, media_type="image/jpeg")
-        return HTMLResponse("not found", 404)
+
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                """SELECT path FROM files
+                   WHERE content_hash = ? AND missing = 0
+                   LIMIT 1""",
+                (content_hash,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return HTMLResponse("not found", 404)
+
+        src = Path(row["path"])
+        if not src.exists():
+            return HTMLResponse("source file missing", 404)
+
+        try:
+            from .. import decode, thumbs as thumbs_mod
+            arr = decode.load_image(src)
+            from ..thumbs import ensure_thumbnail
+            out = ensure_thumbnail(arr, cfg.cache_dir, content_hash)
+            return FileResponse(out, media_type="image/jpeg")
+        except Exception as e:
+            log.warning("thumb generation failed for %s: %s", src, e)
+            return HTMLResponse("decode error", 500)
 
     # Formats browsers can render natively in <img>
     _WEB_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif"})
