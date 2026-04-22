@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -187,6 +187,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fc_person ON face_clusters(person_id)"
         )
+
+    # decode_failed: tombstone for files that errored during decode (corrupt
+    # JPEG, unsupported RAW variant, ...). Marking them avoids retrying the
+    # decode every `index` run, which is wasteful especially over network
+    # mounts. Cleared by `image-wizard clear-failures`.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    if "decode_failed" not in cols:
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN decode_failed INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_decode_failed "
+            "ON files(decode_failed)"
+        )
+    if "decode_error" not in cols:
+        conn.execute("ALTER TABLE files ADD COLUMN decode_error TEXT")
 
 
 def _backfill_persons(conn: sqlite3.Connection) -> None:

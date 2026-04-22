@@ -276,7 +276,17 @@
             </div>
             {% endfor %}
         </div>
-        {% if detections|length == 0 and faces|length == 0 and file['yolo_done'] and file['faces_done'] %}
+        {% if file['decode_failed'] %}
+        <div style="font-size:0.8rem;color:var(--highlight);margin-top:0.4rem;">
+            <strong>Decode failed.</strong> Pipeline can't read this file.<br>
+            <code style="font-size:0.75rem;">{{ file['decode_error'] or '(no error recorded)' }}</code>
+            <div style="color:var(--muted);font-size:0.7rem;margin-top:0.2rem;">
+                Skipped on subsequent <code>index</code> runs. Run
+                <code>image-wizard clear-failures</code> after fixing the file
+                to retry.
+            </div>
+        </div>
+        {% elif detections|length == 0 and faces|length == 0 and file['yolo_done'] and file['faces_done'] %}
         <div style="font-size:0.75rem;color:var(--muted);margin-top:0.3rem;">
             Both detectors ran and found nothing — this photo genuinely has
             no recognisable objects or faces (not a bug).

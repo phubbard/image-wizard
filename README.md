@@ -130,6 +130,12 @@ image-wizard fix-orientations                 # reset ML flags for files whose
                                               # stored dims don't match rotated image
 image-wizard find-duplicates                  # list files sharing a content_hash
 image-wizard find-duplicates --delete         # also remove redundant copies
+
+# Files that failed to decode are tombstoned so subsequent index runs skip
+# them. Inspect / retry:
+image-wizard list-failures                    # paths + recorded errors
+image-wizard clear-failures                   # retry every failed file next index
+image-wizard clear-failures --path '%/iPhone/%'  # retry just one subtree
 ```
 
 ## Web UI

@@ -660,6 +660,67 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="list-failures")
+    def cmd_list_failures(
+        limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
+    ) -> None:
+        """List files marked as `decode_failed` by the pipeline.
+
+        These are skipped on subsequent `index` runs so we don't waste
+        work retrying corrupt or unsupported files. Use `clear-failures`
+        to retry them after fixing or replacing the source file.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE decode_failed=1"
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT id, path, decode_error FROM files
+                   WHERE decode_failed=1
+                   ORDER BY id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            console.print(f"[bold]{total} file(s) marked as decode-failed[/bold]")
+            for r in rows:
+                err = (r["decode_error"] or "")[:80]
+                console.print(f"  #{r['id']:7d}  {r['path']}")
+                console.print(f"           [red]{err}[/red]")
+            if total > limit:
+                console.print(f"... and {total - limit} more (raise --limit)")
+        finally:
+            conn.close()
+
+    @parent.command(name="clear-failures")
+    def cmd_clear_failures(
+        path_glob: str = typer.Option(
+            "", "--path",
+            help="Only clear failures whose path matches this LIKE pattern "
+                 "(e.g. '%/iPhone/%'). Default: clear all.",
+        ),
+    ) -> None:
+        """Reset the `decode_failed` flag so files are retried on next index."""
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            if path_glob:
+                cur = conn.execute(
+                    "UPDATE files SET decode_failed=0, decode_error=NULL "
+                    "WHERE decode_failed=1 AND path LIKE ?",
+                    (path_glob,),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE files SET decode_failed=0, decode_error=NULL "
+                    "WHERE decode_failed=1"
+                )
+            console.print(f"cleared {cur.rowcount} failure(s)")
+        finally:
+            conn.close()
+
     @parent.command(name="diagnose")
     def cmd_diagnose(
         target: str = typer.Argument(
@@ -717,6 +778,13 @@ def register(parent: typer.Typer) -> None:
             for stage in ("meta_done", "yolo_done", "faces_done", "clip_done"):
                 mark = "[green]✓[/green]" if row[stage] else "[red]✗[/red]"
                 console.print(f"  {mark} {stage}")
+            try:
+                if row["decode_failed"]:
+                    console.print(
+                        f"  [red]✗ decode_failed[/red] — {row['decode_error']}"
+                    )
+            except (IndexError, KeyError):
+                pass  # pre-migration DB
 
             meta = conn.execute(
                 "SELECT * FROM photo_meta WHERE file_id=?", (fid,)

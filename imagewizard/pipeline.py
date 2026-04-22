@@ -140,9 +140,12 @@ def index_files(
     where_parts.append("meta_done=0")
 
     where = " OR ".join(where_parts)
+    # decode_failed=0: skip files we've already failed to decode. The user
+    # can clear the flag with `image-wizard clear-failures` after fixing or
+    # replacing the source file, then re-run index.
     query = (
         "SELECT id, path, content_hash, meta_done, yolo_done, faces_done, clip_done "
-        f"FROM files WHERE missing=0 AND ({where})"
+        f"FROM files WHERE missing=0 AND decode_failed=0 AND ({where})"
     )
     if limit:
         query += f" LIMIT {limit}"
@@ -246,6 +249,12 @@ def index_files(
             if prep.error or prep.img is None:
                 if prep.error:
                     log.warning("decode error %s: %s", prep.path, prep.error)
+                    # Tombstone so we don't retry this file every run.
+                    conn.execute(
+                        "UPDATE files SET decode_failed=1, decode_error=? "
+                        "WHERE id=?",
+                        (prep.error[:500], prep.file_id),
+                    )
                 stats["errors"] += 1
                 continue
 

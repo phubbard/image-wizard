@@ -10,9 +10,20 @@ The model weights are downloaded on first run (~300 MB) and cached.
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
+
+# InsightFace's face_align module emits a FutureWarning every face it
+# aligns because it uses scikit-image's old SimilarityTransform API.
+# Third-party code, harmless. Silence it so the index log doesn't fill
+# with the same warning tens of thousands of times.
+warnings.filterwarnings(
+    "ignore",
+    message=".*`estimate` is deprecated.*",
+    category=FutureWarning,
+)
 
 log = logging.getLogger(__name__)
 
