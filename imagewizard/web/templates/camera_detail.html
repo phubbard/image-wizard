@@ -2,7 +2,30 @@
 {% block title_extra %} — {{ camera_model }}{% endblock %}
 {% block content %}
 <h1>{{ camera_model }}</h1>
-<div class="stats-bar">{{ total }} photos</div>
+<div class="stats-bar">{{ total }} photos
+    {% if selected_lens is not none %}
+        · filtered by lens
+    {% endif %}
+</div>
+
+{% if lens_options %}
+{# Sub-selectors for cameras (typically phones) with multiple lens
+   modules. Pills are styled by base.css; .pill.active highlights the
+   current filter. The "All" pill clears the filter. #}
+<div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:1rem;">
+    <a class="pill {% if selected_lens is none %}active{% endif %}"
+       href="/camera/{{ camera_model|urlencode }}">All</a>
+    {% for opt in lens_options %}
+    <a class="pill {% if selected_lens == opt['value'] %}active{% endif %}"
+       href="/camera/{{ camera_model|urlencode }}?lens={{ opt['value']|urlencode }}"
+       title="{{ opt['tooltip'] }}">
+        {{ opt['label'] }}
+        <span style="opacity:0.7;font-size:0.75em;">({{ opt['count'] }})</span>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
 <div class="grid">
     {% for p in photos %}
     <a href="/photo/{{ p['id'] }}">
@@ -15,14 +38,16 @@
     </a>
     {% endfor %}
 </div>
+
 {% if page > 0 or has_next %}
+{% set lens_qs %}{% if selected_lens is not none %}&lens={{ selected_lens|urlencode }}{% endif %}{% endset %}
 <div style="display:flex;gap:1rem;justify-content:center;margin-top:1rem;">
     {% if page > 0 %}
-    <a href="/camera/{{ camera_model|urlencode }}?page={{ page - 1 }}" class="btn">Previous</a>
+    <a href="/camera/{{ camera_model|urlencode }}?page={{ page - 1 }}{{ lens_qs }}" class="btn">Previous</a>
     {% endif %}
     <span style="color: var(--muted);align-self:center;">Page {{ page + 1 }}</span>
     {% if has_next %}
-    <a href="/camera/{{ camera_model|urlencode }}?page={{ page + 1 }}" class="btn">Next</a>
+    <a href="/camera/{{ camera_model|urlencode }}?page={{ page + 1 }}{{ lens_qs }}" class="btn">Next</a>
     {% endif %}
 </div>
 {% endif %}

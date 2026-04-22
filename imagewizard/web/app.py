@@ -968,27 +968,176 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    def _lens_options(conn, camera_model: str) -> list[dict]:
+        """Distinct *physical* lenses for a camera, with friendly labels.
+
+        For phones with multiple lens modules (iPhone "back triple
+        camera 4.25mm" / "back triple camera 1.54mm" / "front camera
+        2.71mm" etc.), this enables a pill row on /camera/{model} so you
+        can drill into "just the ultrawide shots" or "just selfies".
+
+        Why grouping matters: iOS reports the same physical lens with
+        different lens strings depending on which camera mode the user
+        was in ("back triple camera 4.25mm" vs "back dual wide camera
+        4.25mm" vs "back camera 4.25mm" — all the same Main lens). We
+        group by ``(orientation, focal_mm)`` so each physical lens gets
+        exactly one pill that filters across all the EXIF variants.
+
+        Labelling strategy:
+        * Strip the camera model prefix that EXIF tools repeat in the
+          lens string.
+        * Detect "front" vs "back" by keyword.
+        * For back cameras, sort groups by focal length and assign
+          relative position labels (shortest → "Ultra wide", longest →
+          "Telephoto", in between → "Main") so the names are stable
+          across phone generations even though absolute mm differs.
+
+        Returns a list of dicts; each ``value`` is a comma-separated
+        list of raw lens strings to be matched via SQL ``IN``.
+        """
+        import re
+
+        rows = conn.execute(
+            """SELECT pm.lens AS lens, COUNT(*) AS cnt
+               FROM photo_meta pm
+               JOIN files f ON f.id = pm.file_id
+               WHERE pm.camera_model = ? AND f.missing = 0
+               GROUP BY pm.lens
+               ORDER BY cnt DESC""",
+            (camera_model,),
+        ).fetchall()
+
+        m_lower = camera_model.lower()
+
+        def parse(lens: str | None) -> tuple[str, float | None]:
+            if not lens or lens == "65535":
+                return ("unknown", None)
+            s = lens.lower()
+            if s.startswith(m_lower):
+                s = s[len(m_lower):].strip()
+            orient = "front" if ("front" in s or "selfie" in s) else "back"
+            fm = re.search(r"(\d+(?:\.\d+)?)\s*mm", s)
+            focal = float(fm.group(1)) if fm else None
+            return (orient, focal)
+
+        # Group raw lens rows by (orient, rounded focal). Round to 0.1mm
+        # to coalesce trivial floating-point variations ("4.25mm" stays
+        # distinct from "6.0mm"). Lenses with no focal length get their
+        # own bucket per orientation.
+        groups: dict[tuple[str, float | None], dict] = {}
+        for r in rows:
+            orient, focal = parse(r["lens"])
+            key = (orient, round(focal, 1) if focal else None)
+            g = groups.setdefault(key, {
+                "orient": orient,
+                "focal": focal,
+                "lenses": [],
+                "count": 0,
+            })
+            if r["lens"] is not None:
+                g["lenses"].append(r["lens"])
+            g["count"] += r["cnt"]
+
+        if len(groups) <= 1:
+            return []  # one physical lens — no pill row needed
+
+        # Rank back-camera groups by focal length for relative labels.
+        back_sorted = sorted(
+            [g for k, g in groups.items() if k[0] == "back" and g["focal"]],
+            key=lambda g: g["focal"],
+        )
+        position_label = {}
+        if len(back_sorted) == 1:
+            position_label[id(back_sorted[0])] = "Main"
+        elif len(back_sorted) == 2:
+            position_label[id(back_sorted[0])] = "Wide"
+            position_label[id(back_sorted[1])] = "Tele"
+        elif len(back_sorted) >= 3:
+            position_label[id(back_sorted[0])] = "Ultra wide"
+            position_label[id(back_sorted[-1])] = "Telephoto"
+            for g in back_sorted[1:-1]:
+                position_label[id(g)] = "Main"
+
+        out: list[dict] = []
+        # Sort: back lenses first (by focal asc), then front, then unknown.
+        order_key = lambda g: (
+            {"back": 0, "front": 1, "unknown": 2}[g["orient"]],
+            g["focal"] or 999,
+        )
+        for g in sorted(groups.values(), key=order_key):
+            if g["orient"] == "front":
+                label = "Front"
+                if g["focal"]:
+                    label += f" · {g['focal']:g}mm"
+            elif g["orient"] == "unknown":
+                label = "(no lens info)"
+            else:
+                pos = position_label.get(id(g))
+                if pos and g["focal"]:
+                    label = f"{pos} · {g['focal']:g}mm"
+                elif pos:
+                    label = pos
+                elif g["focal"]:
+                    label = f"Back · {g['focal']:g}mm"
+                else:
+                    label = "Back"
+
+            # The pill's "value" is a tab-separated list of lens strings
+            # (tab is safe — never appears in EXIF lens fields). The
+            # detail route splits this back to an IN-clause.
+            value = "\t".join(g["lenses"])  # empty string if all NULL
+            tooltip = "\n".join(g["lenses"]) if g["lenses"] else "(no lens info)"
+            out.append({
+                "value": value,
+                "label": label,
+                "count": g["count"],
+                "tooltip": tooltip,
+            })
+        return out
+
     @app.get("/camera/{camera_model}", response_class=HTMLResponse)
-    async def camera_detail(request: Request, camera_model: str, page: int = Query(0, ge=0)):
+    async def camera_detail(
+        request: Request,
+        camera_model: str,
+        page: int = Query(0, ge=0),
+        lens: str | None = Query(None, description="Filter by exact lens string"),
+    ):
         conn = get_conn()
         try:
             per_page = 60
             offset = page * per_page
+
+            # `lens` is a tab-separated bundle of EXIF lens strings that
+            # all map to one physical lens (e.g. iOS reports the same
+            # lens differently per camera mode). Empty-string param =
+            # "(no lens info)" pill → matches NULL lens rows.
+            where = "pm.camera_model = ? AND f.missing = 0"
+            params: list = [camera_model]
+            if lens is not None:
+                if lens == "":
+                    where += " AND pm.lens IS NULL"
+                else:
+                    parts = [p for p in lens.split("\t") if p]
+                    if parts:
+                        placeholders = ",".join("?" * len(parts))
+                        where += f" AND pm.lens IN ({placeholders})"
+                        params.extend(parts)
+
             total = conn.execute(
-                """SELECT COUNT(*) FROM files f
-                   JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE pm.camera_model = ? AND f.missing = 0""",
-                (camera_model,),
+                f"""SELECT COUNT(*) FROM files f
+                    JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {where}""",
+                params,
             ).fetchone()[0]
             rows = conn.execute(
-                """SELECT f.id, f.path, f.content_hash, f.width, f.height,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country
-                   FROM files f
-                   JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE pm.camera_model = ? AND f.missing = 0
-                   ORDER BY pm.taken_at DESC
-                   LIMIT ? OFFSET ?""",
-                (camera_model, per_page, offset),
+                f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                           pm.taken_at, pm.camera_model, pm.city, pm.country
+                    FROM files f
+                    JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {where}
+                    ORDER BY pm.taken_at DESC
+                    LIMIT ? OFFSET ?""",
+                params + [per_page, offset],
             ).fetchall()
             has_next = offset + per_page < total
             return TEMPLATES.TemplateResponse(request, "camera_detail.html", {
@@ -997,6 +1146,8 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
                 "total": total,
+                "lens_options": _lens_options(conn, camera_model),
+                "selected_lens": lens,
             })
         finally:
             conn.close()

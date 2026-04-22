@@ -92,6 +92,11 @@
             transition: background 0.15s;
         }
         a.pill:hover { background: var(--highlight); color: #fff; }
+        a.pill.active {
+            background: var(--highlight);
+            color: #fff;
+            box-shadow: 0 0 0 2px rgba(233,69,96,0.35);
+        }
         form label { display: block; margin-top: 0.5rem; font-size: 0.85rem; }
         input, select {
             background: var(--card);
