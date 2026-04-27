@@ -160,6 +160,12 @@
         <a href="/faces">Faces</a>
         <a href="/map">Map</a>
         <a href="/about">About</a>
+        {% if filter_badge and filter_badge() %}
+        <a href="/about" title="A subset of scanned directories is active. Click to manage."
+           style="margin-left:auto;background:var(--highlight);color:#fff;padding:2px 10px;border-radius:12px;font-size:0.75rem;">
+            ⌖ filtered
+        </a>
+        {% endif %}
     </nav>
     <div class="container">
         {% block content %}{% endblock %}

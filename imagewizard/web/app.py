@@ -53,7 +53,65 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     def get_conn():
         return db.connect(cfg.db_path)
 
+    # Surface the visible-roots filter badge on every template via a
+    # Jinja global. Cheap (one app_meta lookup per render) and means the
+    # nav bar reflects the current filter without each route having to
+    # remember to pass `filter_badge` into its template context.
+    def _filter_active() -> bool:
+        c = db.connect(cfg.db_path)
+        try:
+            return bool(_get_visible_roots(c))
+        finally:
+            c.close()
+    TEMPLATES.env.globals["filter_badge"] = _filter_active
+
     # ---- Routes ----
+
+    # ------------------------------------------------------------------
+    # Visible-roots filter
+    # ------------------------------------------------------------------
+    # Users can narrow Timeline / Search / Map etc. to a subset of their
+    # scanned directories. The selection is stored server-side in
+    # app_meta as a JSON list of root paths. Empty / missing = no filter
+    # = show everything (default). Configured on /about.
+
+    def _get_visible_roots(conn) -> list[str]:
+        """Return the list of currently-selected root paths.
+
+        Empty list = no filter = show everything.
+        """
+        import json
+        raw = db.get_meta(conn, "visible_roots", "")
+        if not raw:
+            return []
+        try:
+            v = json.loads(raw)
+            return [str(p) for p in v] if isinstance(v, list) else []
+        except Exception:
+            return []
+
+    def _set_visible_roots(conn, roots: list[str]) -> None:
+        import json
+        db.set_meta(conn, "visible_roots", json.dumps(roots))
+
+    def _root_filter_sql(roots: list[str]) -> tuple[str, list]:
+        """Return ``(" AND (...)"-style SQL fragment, params)`` for filtering
+        ``files.path`` by root prefix. Empty list → empty fragment, no
+        filter applied.
+
+        Uses ``LIKE 'root/%'`` rather than path equality so all files
+        nested under a selected root are matched. Caller must use
+        ``files`` as ``f`` (or adjust).
+        """
+        if not roots:
+            return "", []
+        clauses = []
+        params: list = []
+        for r in roots:
+            r = r.rstrip("/")
+            clauses.append("f.path LIKE ?")
+            params.append(r + "/%")
+        return " AND (" + " OR ".join(clauses) + ")", params
 
     def _parse_months(raw: str) -> list[str]:
         """'1,3,12' → ['01', '03', '12']. Silently drops junk."""
@@ -77,7 +135,9 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 result.append(m)
         return result
 
-    def _build_timeline_where(year: str, months: list[str]) -> tuple[str, list]:
+    def _build_timeline_where(
+        year: str, months: list[str], roots: list[str] | None = None
+    ) -> tuple[str, list]:
         where = "f.missing = 0"
         params: list = []
         if year:
@@ -87,6 +147,10 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             placeholders = ",".join("?" * len(months))
             where += f" AND SUBSTR(pm.taken_at, 6, 2) IN ({placeholders})"
             params.extend(months)
+        if roots:
+            frag, rp = _root_filter_sql(roots)
+            where += frag
+            params.extend(rp)
         return where, params
 
     @app.get("/", response_class=HTMLResponse)
@@ -119,7 +183,9 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     (f"{year}%",),
                 ).fetchall()]
 
-            where, params = _build_timeline_where(year, sel_months)
+            where, params = _build_timeline_where(
+                year, sel_months, _get_visible_roots(conn)
+            )
 
             total = conn.execute(
                 f"""SELECT COUNT(*) FROM files f
@@ -168,7 +234,9 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             offset = page * per_page
             sel_months = _parse_months(months)
 
-            where, params = _build_timeline_where(year, sel_months)
+            where, params = _build_timeline_where(
+                year, sel_months, _get_visible_roots(conn)
+            )
 
             rows = conn.execute(
                 f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
@@ -602,12 +670,19 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
         Used by both the /search page and /photo/{id} (so prev/next on the
         detail view can walk the same result set).
+
+        All non-CLIP branches honour the visible-roots filter from
+        /about. CLIP MATCH queries can't easily compose with arbitrary
+        WHERE clauses (sqlite-vec gates them), so we post-filter the
+        k-NN result by path prefix in Python — accept that this can
+        return fewer than ``k`` rows when the filter is strict.
         """
+        rfrag, rparams = _root_filter_sql(_get_visible_roots(conn))
         if q:
             from ..models.clip import embed_text
             vec = embed_text(q)
             vec_bytes = struct.pack(f"{len(vec)}f", *vec.tolist())
-            return conn.execute(
+            rows = conn.execute(
                 """SELECT v.rowid AS id, v.distance, f.path, f.content_hash,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM vec_clip v
@@ -617,63 +692,69 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    ORDER BY v.distance""",
                 (vec_bytes, k),
             ).fetchall()
+            if rparams:
+                # Post-filter by root prefix, since sqlite-vec MATCH +
+                # composed WHERE doesn't always work as expected.
+                allowed = [r.rstrip("/") + "/" for r in _get_visible_roots(conn)]
+                rows = [r for r in rows if any(r["path"].startswith(p) for p in allowed)]
+            return rows
         if label:
             return conn.execute(
-                """SELECT DISTINCT f.id, f.path, f.content_hash,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country
-                   FROM detections d
-                   JOIN files f ON f.id = d.file_id
-                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE d.label = ? AND f.missing = 0
-                   ORDER BY pm.taken_at DESC
-                   LIMIT ?""",
-                (label, k),
+                f"""SELECT DISTINCT f.id, f.path, f.content_hash,
+                           pm.taken_at, pm.camera_model, pm.city, pm.country
+                    FROM detections d
+                    JOIN files f ON f.id = d.file_id
+                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE d.label = ? AND f.missing = 0 {rfrag}
+                    ORDER BY pm.taken_at DESC
+                    LIMIT ?""",
+                [label] + rparams + [k],
             ).fetchall()
         if person:
             return conn.execute(
-                """SELECT DISTINCT f.id, f.path, f.content_hash,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country
-                   FROM faces fa
-                   JOIN files f ON f.id = fa.file_id
-                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE fa.person_name = ? AND f.missing = 0
-                   ORDER BY pm.taken_at DESC
-                   LIMIT ?""",
-                (person, k),
+                f"""SELECT DISTINCT f.id, f.path, f.content_hash,
+                           pm.taken_at, pm.camera_model, pm.city, pm.country
+                    FROM faces fa
+                    JOIN files f ON f.id = fa.file_id
+                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE fa.person_name = ? AND f.missing = 0 {rfrag}
+                    ORDER BY pm.taken_at DESC
+                    LIMIT ?""",
+                [person] + rparams + [k],
             ).fetchall()
         if cluster is not None:
             return conn.execute(
-                """SELECT DISTINCT f.id, f.path, f.content_hash,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country
-                   FROM faces fa
-                   JOIN files f ON f.id = fa.file_id
-                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE fa.cluster_id = ? AND f.missing = 0
-                   ORDER BY pm.taken_at DESC
-                   LIMIT ?""",
-                (cluster, k),
+                f"""SELECT DISTINCT f.id, f.path, f.content_hash,
+                           pm.taken_at, pm.camera_model, pm.city, pm.country
+                    FROM faces fa
+                    JOIN files f ON f.id = fa.file_id
+                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE fa.cluster_id = ? AND f.missing = 0 {rfrag}
+                    ORDER BY pm.taken_at DESC
+                    LIMIT ?""",
+                [cluster] + rparams + [k],
             ).fetchall()
         if camera:
             return conn.execute(
-                """SELECT f.id, f.path, f.content_hash,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country
-                   FROM files f
-                   JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE pm.camera_model = ? AND f.missing = 0
-                   ORDER BY pm.taken_at DESC
-                   LIMIT ?""",
-                (camera, k),
+                f"""SELECT f.id, f.path, f.content_hash,
+                           pm.taken_at, pm.camera_model, pm.city, pm.country
+                    FROM files f
+                    JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE pm.camera_model = ? AND f.missing = 0 {rfrag}
+                    ORDER BY pm.taken_at DESC
+                    LIMIT ?""",
+                [camera] + rparams + [k],
             ).fetchall()
         if country:
             return conn.execute(
-                """SELECT f.id, f.path, f.content_hash,
-                          pm.taken_at, pm.camera_model, pm.city, pm.country
-                   FROM files f
-                   JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE pm.country = ? AND f.missing = 0
-                   ORDER BY pm.taken_at DESC
-                   LIMIT ?""",
-                (country, k),
+                f"""SELECT f.id, f.path, f.content_hash,
+                           pm.taken_at, pm.camera_model, pm.city, pm.country
+                    FROM files f
+                    JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE pm.country = ? AND f.missing = 0 {rfrag}
+                    ORDER BY pm.taken_at DESC
+                    LIMIT ?""",
+                [country] + rparams + [k],
             ).fetchall()
         return []
 
@@ -1314,12 +1395,16 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     async def map_page(request: Request):
         conn = get_conn()
         try:
+            root_frag, root_params = _root_filter_sql(_get_visible_roots(conn))
             points = conn.execute(
-                """SELECT f.id, f.content_hash, pm.lat, pm.lon, pm.city, pm.country,
-                          pm.taken_at
-                   FROM photo_meta pm
-                   JOIN files f ON f.id = pm.file_id
-                   WHERE pm.lat IS NOT NULL AND pm.lon IS NOT NULL AND f.missing = 0"""
+                f"""SELECT f.id, f.content_hash, pm.lat, pm.lon, pm.city, pm.country,
+                           pm.taken_at
+                    FROM photo_meta pm
+                    JOIN files f ON f.id = pm.file_id
+                    WHERE pm.lat IS NOT NULL AND pm.lon IS NOT NULL
+                      AND f.missing = 0
+                      {root_frag}""",
+                root_params,
             ).fetchall()
             return TEMPLATES.TemplateResponse(request, "map.html", {
                 "points": points,
@@ -1370,6 +1455,11 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 for r in roots
             ]
 
+            visible = set(_get_visible_roots(conn))
+            for r in roots_fmt:
+                # checked = currently in the visible set (or no filter at all)
+                r["visible"] = (not visible) or (r["path"] in visible)
+
             return TEMPLATES.TemplateResponse(request, "about.html", {
                 "roots": roots_fmt,
                 "last_index_at": _fmt_ts(last_index_at),
@@ -1381,9 +1471,38 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "clusters_n": clusters_n,
                 "db_size_human": _fmt_bytes(db_size),
                 "db_path": str(cfg.db_path),
+                "filter_active": bool(visible),
             })
         finally:
             conn.close()
+
+    @app.post("/about/visible-roots")
+    async def update_visible_roots(request: Request):
+        """Update the per-user visible-roots filter.
+
+        If every root is checked, store an empty list (no filter). If a
+        strict subset is checked, store that list. The filter is read by
+        the timeline / search / map / nearby queries.
+        """
+        form = await request.form()
+        # Multi-checkbox names share the same field; FormData supports getlist.
+        try:
+            picked = [str(p) for p in form.getlist("root")]
+        except AttributeError:
+            picked = [str(form.get("root"))] if form.get("root") else []
+        conn = get_conn()
+        try:
+            all_roots = [
+                r[0] for r in conn.execute("SELECT path FROM scan_roots")
+            ]
+            # Strict subset → save it. All-checked → clear (no filter).
+            if set(picked) == set(all_roots):
+                _set_visible_roots(conn, [])
+            else:
+                _set_visible_roots(conn, picked)
+        finally:
+            conn.close()
+        return RedirectResponse("/about", status_code=303)
 
     # Browsers (especially iOS Safari) hit these root paths regardless of
     # any <link rel="icon"> tag. Serve them directly from /static so we

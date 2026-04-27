@@ -347,6 +347,59 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="rescan")
+    def cmd_rescan(
+        prune: bool = typer.Option(
+            True, "--prune/--no-prune",
+            help="Mark files not found on disk as missing (default: yes).",
+        ),
+        min_pixels: int = typer.Option(
+            MIN_PIXELS_DEFAULT, "--min-pixels",
+            help="Skip images where BOTH dimensions are below this.",
+        ),
+    ) -> None:
+        """Re-scan every directory previously passed to ``scan``.
+
+        Reads the ``scan_roots`` table — populated automatically by the
+        ``scan`` command — and walks each root again. Use this after
+        you've added or removed photos in any of your known locations
+        and want to refresh the index in one shot, without retyping
+        every path.
+        """
+        cfg = config.load()
+        db.init(cfg.db_path)
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            roots = [
+                Path(r[0]) for r in conn.execute(
+                    "SELECT path FROM scan_roots ORDER BY path"
+                )
+            ]
+            if not roots:
+                console.print(
+                    "[yellow]no scan_roots recorded[/yellow] — "
+                    "run `image-wizard scan <path>` at least once first."
+                )
+                return
+            console.print(
+                f"[bold]rescanning {len(roots)} root(s):[/bold]"
+            )
+            for r in roots:
+                exists = "" if r.exists() else "  [red](unmounted)[/red]"
+                console.print(f"  • {r}{exists}")
+            # Drop unmounted roots so we don't false-positive --prune
+            # files under a temporarily-unavailable network mount.
+            roots = [r for r in roots if r.exists()]
+            if not roots:
+                console.print("[red]no roots are currently mounted/accessible[/red]")
+                return
+            result = scan(roots, conn, prune=prune, min_pixels=min_pixels)
+            for k, v in result.items():
+                console.print(f"  {k}: {v}")
+        finally:
+            conn.close()
+
     @parent.command(name="drop-small")
     def cmd_drop_small(
         min_pixels: int = typer.Option(

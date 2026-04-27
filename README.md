@@ -69,6 +69,12 @@ image-wizard scan ~/Photos /Volumes/SD-Card/DCIM
 image-wizard scan ~/Photos --prune            # mark on-disk deletions missing
 image-wizard scan ~/Photos --min-pixels 320   # skip tiny thumbnails
 
+# Re-scan every directory you've ever scanned (reads the scan_roots
+# table — no need to retype paths). Skips unmounted roots so an
+# offline volume doesn't false-positive --prune.
+image-wizard rescan
+image-wizard rescan --no-prune                # don't tombstone missing files
+
 # Run the ML pipeline on files that have been scanned but not yet indexed
 image-wizard index                            # full pipeline, resumable
 image-wizard index -n 1000                    # limit to N files this run

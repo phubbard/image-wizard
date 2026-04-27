@@ -122,14 +122,34 @@
 <div class="about-section">
     <h2>Scanned directories ({{ roots|length }})</h2>
     {% if roots %}
-    <ul class="root-list">
-        {% for r in roots %}
-        <li>
-            <span class="path">{{ r['path'] }}</span>
-            <span class="ts">scanned {{ r['last_scanned'] or '?' }}</span>
-        </li>
-        {% endfor %}
-    </ul>
+    {# Each row has a checkbox controlling whether photos under that
+       root appear in Timeline / Search / Map / Nearby. All-checked
+       means "no filter" (the default); a strict subset persists as
+       the filter. #}
+    <form method="post" action="/about/visible-roots">
+        <ul class="root-list">
+            {% for r in roots %}
+            <li>
+                <label style="display:flex;gap:0.6rem;align-items:center;flex:1;cursor:pointer;">
+                    <input type="checkbox" name="root" value="{{ r['path'] }}"
+                           {% if r['visible'] %}checked{% endif %}>
+                    <span class="path">{{ r['path'] }}</span>
+                </label>
+                <span class="ts">scanned {{ r['last_scanned'] or '?' }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        <div style="margin-top:0.6rem;display:flex;gap:0.5rem;align-items:center;">
+            <button type="submit">Apply filter</button>
+            <span style="color:var(--muted);font-size:0.8rem;">
+                {% if filter_active %}
+                    Filter active — uncheck none to show everything.
+                {% else %}
+                    All directories visible.
+                {% endif %}
+            </span>
+        </div>
+    </form>
     {% else %}
     <p style="color: var(--muted);">No directories scanned yet. Run
         <code>image-wizard scan /path/to/photos</code>.</p>
