@@ -10,11 +10,22 @@ Pipeline stages:
    InsightFace (CPU/ONNX, uses its own thread pool) on each pre-decoded
    image. GPU stays fed because images are already waiting in the queue.
 4. **DB writes** — serialized on the main thread after each image.
+
+Crash diagnostics:
+
+A persistent checkpoint log is written to ``<cache>/logs/index.log`` —
+each line records "start", "done", "error", or "mem" with a timestamp
+and the file id/path. After a silent crash (segfault, OOM kill,
+process supervisor kill — none of which Python can intercept) tail the
+log to see exactly which file was being processed at the moment of
+death and what the memory trajectory was. Memory snapshots also fire
+every 250 processed files to catch slow leaks early.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sqlite3
 import struct
@@ -42,9 +53,78 @@ log = logging.getLogger(__name__)
 
 META_BATCH = 200  # exiftool batch size
 
+# Memory-snapshot interval. Cheap (one psutil call) so a tight cadence is
+# fine; a leak typically grows by ~1 MB per file when it does, so 250
+# files is enough resolution to spot it early.
+MEM_SNAPSHOT_EVERY = 250
+
 
 def _vec_bytes(arr: np.ndarray) -> bytes:
     return struct.pack(f"{len(arr)}f", *arr.tolist())
+
+
+class CheckpointLog:
+    """Append-only crash-diagnostic log.
+
+    Writes one line per file lifecycle event (start/done/error) plus
+    periodic memory snapshots. Flushed and fsync'd after every write so
+    that a hard kill (OOM, segfault, power loss) leaves the last entry
+    on disk — the user can ``tail`` the file after a crash to see the
+    exact file that was in flight.
+
+    Format is intentionally trivial (one event per line, space-
+    separated) so it's grep- and awk-friendly. Goes under
+    ``<cache>/logs/index.log``.
+    """
+
+    def __init__(self, cache_dir: Path):
+        self.path = cache_dir / "logs" / "index.log"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self.path.open("a", buffering=1)  # line-buffered
+        self._lock = threading.Lock()
+        self._proc = None
+        try:
+            import psutil
+            self._proc = psutil.Process()
+        except ImportError:
+            pass
+        self._write("--- index started", os.getpid())
+
+    def _write(self, *parts) -> None:
+        line = f"{time.time():.3f} " + " ".join(str(p) for p in parts) + "\n"
+        with self._lock:
+            self._fh.write(line)
+            self._fh.flush()
+            try:
+                os.fsync(self._fh.fileno())
+            except OSError:
+                pass  # fsync failure shouldn't kill indexing
+
+    def start(self, file_id: int, path: Path) -> None:
+        self._write("start", file_id, path)
+
+    def done(self, file_id: int) -> None:
+        self._write("done", file_id)
+
+    def error(self, file_id: int, msg: str) -> None:
+        # Single-line escaping so the log stays grep-friendly.
+        msg = msg.replace("\n", " | ")[:200]
+        self._write("error", file_id, msg)
+
+    def memory(self, processed: int) -> None:
+        if self._proc is None:
+            return
+        try:
+            mi = self._proc.memory_info()
+            rss_mb = mi.rss / (1024 * 1024)
+            self._write("mem", f"processed={processed}", f"rss_mb={rss_mb:.0f}")
+        except Exception:
+            pass
+
+    def close(self, msg: str = "shutdown") -> None:
+        self._write("---", msg)
+        with self._lock:
+            self._fh.close()
 
 
 @dataclass
@@ -202,6 +282,8 @@ def index_files(
     # --- Phase 3: prefetch decode + GPU inference ---
     stats = {"processed": 0, "errors": 0, "images/sec": 0.0}
     t0 = time.monotonic()
+    chk = CheckpointLog(cfg.cache_dir)
+    chk.memory(0)  # baseline before the loop
 
     with Progress(
         SpinnerColumn(),
@@ -245,10 +327,12 @@ def index_files(
             prep: PreparedImage = fut.result()
             prog.update(task, description=f"[cyan]{prep.path.name}")
             prog.advance(task)
+            chk.start(prep.file_id, prep.path)
 
             if prep.error or prep.img is None:
                 if prep.error:
                     log.warning("decode error %s: %s", prep.path, prep.error)
+                    chk.error(prep.file_id, f"decode: {prep.error}")
                     # Tombstone so we don't retry this file every run.
                     conn.execute(
                         "UPDATE files SET decode_failed=1, decode_error=? "
@@ -321,12 +405,17 @@ def index_files(
 
                 prep.img = None  # free early
                 stats["processed"] += 1
+                chk.done(prep.file_id)
+                if stats["processed"] % MEM_SNAPSHOT_EVERY == 0:
+                    chk.memory(stats["processed"])
 
             except Exception as e:
                 log.warning("error processing %s: %s", prep.path, e)
+                chk.error(prep.file_id, f"process: {e}")
                 stats["errors"] += 1
 
         pool.shutdown(wait=True)
+    chk.close("loop exited cleanly")
 
     elapsed = time.monotonic() - t0
     if elapsed > 0 and stats["processed"] > 0:

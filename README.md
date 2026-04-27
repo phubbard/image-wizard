@@ -222,6 +222,35 @@ imagewizard/
 
 Override with `IMAGEWIZARD_DATA_DIR` and `IMAGEWIZARD_CACHE_DIR` env vars.
 
+## Debugging silent crashes
+
+`image-wizard index` is long-running and touches several native
+extensions (PyTorch/MPS, ONNX runtime, Pillow, libheif). Sometimes it
+dies without a Python traceback — the usual culprits are macOS killing
+the process under memory pressure, or a segfault inside a C library.
+Python can't intercept either case.
+
+To make these debuggable, the pipeline writes an append-only checkpoint
+log to ``~/Library/Caches/image-wizard/logs/index.log``. Each file's
+lifecycle gets a line (``start`` / ``done`` / ``error``) and an RSS
+snapshot fires every 250 processed files. Each line is fsync'd before
+moving on so the last entry survives a hard kill.
+
+After a crash:
+
+```bash
+# What was the last file in flight + recent memory trajectory?
+image-wizard last-crash             # tail 40 lines
+image-wizard last-crash -n 200      # more
+
+# OS-level crash dumps (macOS): segfaults land here as .ips files
+ls -lat ~/Library/Logs/DiagnosticReports/ | head
+```
+
+If memory is climbing in the ``mem`` snapshots, lower the worker count
+(``--workers 4``) and/or skip CLIP for the first pass
+(``--no-clip``) — CLIP keeps the largest tensors resident.
+
 ## Typical workflows
 
 ```bash

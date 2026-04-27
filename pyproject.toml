@@ -34,6 +34,8 @@ dependencies = [
     "uvicorn>=0.30",
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
+    # Crash diagnostics — RSS sampling for the index checkpoint log
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

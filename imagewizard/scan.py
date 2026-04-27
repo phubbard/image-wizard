@@ -660,6 +660,50 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="last-crash")
+    def cmd_last_crash(
+        tail: int = typer.Option(40, "--tail", "-n", help="Lines to show."),
+    ) -> None:
+        """Show the tail of the index checkpoint log.
+
+        Use this after a silent crash (segfault, OOM kill, supervisor
+        kill) to see exactly which file was being processed at the
+        moment of death and the recent memory trajectory. The log lives
+        at ``<cache_dir>/logs/index.log`` — append-only, fsync'd after
+        every write so the last entry survives a hard kill.
+
+        Lines are space-separated:
+          <unix_ts> start  <file_id> <path>
+          <unix_ts> done   <file_id>
+          <unix_ts> error  <file_id> <message>
+          <unix_ts> mem    processed=N rss_mb=M
+        """
+        cfg = config.load()
+        log_path = cfg.cache_dir / "logs" / "index.log"
+        console = Console()
+        if not log_path.exists():
+            console.print(f"[yellow]no log at {log_path}[/yellow]")
+            console.print("Run `image-wizard index` first.")
+            return
+        console.print(f"[dim]{log_path}[/dim]")
+        # Read the tail without slurping the whole file
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = min(size, 64 * 1024)
+            f.seek(size - block)
+            chunk = f.read().decode("utf-8", errors="replace")
+        lines = chunk.splitlines()[-tail:]
+        for ln in lines:
+            if " error " in ln:
+                console.print(f"[red]{ln}[/red]")
+            elif " mem " in ln:
+                console.print(f"[cyan]{ln}[/cyan]")
+            elif ln.startswith(("---",)) or " ---" in ln:
+                console.print(f"[bold yellow]{ln}[/bold yellow]")
+            else:
+                console.print(ln)
+
     @parent.command(name="list-failures")
     def cmd_list_failures(
         limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
