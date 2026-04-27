@@ -16,13 +16,19 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import queue
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator
 
 import typer
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+from rich.progress import (
+    Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn,
+    TimeElapsedColumn,
+)
 
 from . import config, db
 
@@ -85,47 +91,46 @@ def _is_too_small(path: Path, min_pixels: int) -> bool:
         return False
 
 
-def discover(roots: list[Path]) -> Iterator[Path]:
-    """Yield supported image paths under *roots*, skipping dot-dirs and
-    Apple Photos library internals.
+def _walk_one_root(root: Path) -> Iterator[Path]:
+    """Yield supported image paths under a single root.
 
-    No per-file open here — we want enumeration to be cheap so that
-    incremental scans (where most files are already indexed and
-    unchanged) finish quickly. The dimension-based "is this a
-    thumbnail?" check is applied in ``scan()`` only for files that are
-    actually new or changed; established files don't pay the cost
-    again.
+    No per-file open here — enumeration must stay cheap so incremental
+    scans finish quickly. The dimension-based "is this a thumbnail?"
+    check happens in ``scan()`` for new/changed files only.
 
     Skipped subtrees inside `.photoslibrary` packages:
-    Thumbnails / resources / private / external / database / scopes
-    These hold auto-generated previews and metadata; the actual photos
-    live in `originals/`, which we DO want.
+    Thumbnails / resources / private / external / database / scopes —
+    auto-generated previews and metadata. The actual photos live in
+    `originals/`, which we keep.
+    """
+    root = root.expanduser().resolve()
+    if root.is_file():
+        if root.suffix.lower() in SUPPORTED_EXTS:
+            yield root
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if ".photoslibrary" in dirpath:
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in {
+                    "Thumbnails", "resources", "private", "external",
+                    "database", "scopes",
+                }
+            ]
+        for fn in filenames:
+            if fn.startswith("."):
+                continue
+            if Path(fn).suffix.lower() in SUPPORTED_EXTS:
+                yield Path(dirpath) / fn
+
+
+def discover(roots: list[Path]) -> Iterator[Path]:
+    """Serial walker over multiple roots. Kept for callers / tests that
+    want a simple flat iterator (parallel walking lives in ``scan``).
     """
     for root in roots:
-        root = root.expanduser().resolve()
-        if root.is_file():
-            if root.suffix.lower() in SUPPORTED_EXTS:
-                yield root
-            continue
-        for dirpath, dirnames, filenames in os.walk(root):
-            # Skip hidden directories.
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-            # Inside an Apple Photos library, skip auto-generated subtrees
-            # but keep `originals/` (the real photos). These directories
-            # double-count the library and create face/object duplicates.
-            if ".photoslibrary" in dirpath:
-                dirnames[:] = [
-                    d for d in dirnames
-                    if d not in {
-                        "Thumbnails", "resources", "private", "external",
-                        "database", "scopes",
-                    }
-                ]
-            for fn in filenames:
-                if fn.startswith("."):
-                    continue
-                if Path(fn).suffix.lower() in SUPPORTED_EXTS:
-                    yield Path(dirpath) / fn
+        yield from _walk_one_root(root)
 
 
 def scan(
@@ -134,8 +139,19 @@ def scan(
     prune: bool = False,
     min_pixels: int = MIN_PIXELS_DEFAULT,
     dedupe: bool = True,
+    walk_workers: int | None = None,
 ) -> dict[str, int]:
     """Walk *roots*, insert/update `files`, return summary counts.
+
+    Each root is walked in its own thread (capped by ``walk_workers``,
+    default ``min(len(roots), 8)``) and discovered paths are streamed
+    into the main thread for processing. Big win on SMB/network mounts
+    where directory enumeration latency dominates wall time —
+    overlapping walks across roots hides per-root stat latency. Within
+    each root the walk is still serial (single-threaded ``os.walk``);
+    SMB servers with NVMe caches handle concurrent reads from
+    *different* mounts much better than concurrent reads from the same
+    one, so per-root threading is the right granularity.
 
     When *dedupe* is True (the default), a newly-discovered file whose
     sha256 matches an already-indexed live row is skipped entirely — no
@@ -161,7 +177,6 @@ def scan(
         )
 
     paths_seen: set[str] = set()
-    files = list(discover(roots))
 
     # Pre-load every known (path → mtime, size, missing, too_small, id)
     # into memory. The hot path is then a Python dict lookup instead of
@@ -177,136 +192,207 @@ def scan(
             r["mtime"], r["size"], r["missing"], r["too_small"], r["id"],
         )
 
+    if walk_workers is None:
+        walk_workers = min(max(len(roots), 1), 8)
+
+    # Bounded queue: walkers block when consumer falls behind so a slow
+    # SQLite write (changed/new file branch) doesn't let memory blow up
+    # with millions of pending Path objects.
+    path_q: queue.Queue = queue.Queue(maxsize=10_000)
+    SENTINEL = (None, None)
+
+    def walker(root_idx: int, root: Path) -> None:
+        try:
+            for p in _walk_one_root(root):
+                path_q.put((root_idx, p))
+        except Exception as e:
+            # Surface walker failures as a special error tuple so we can
+            # bump stats without crashing the consumer.
+            path_q.put((root_idx, e))
+        finally:
+            path_q.put((root_idx, None))  # per-root done marker
+
+    console = Console(stderr=True)
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
-        console=Console(stderr=True),
+        TimeElapsedColumn(),
+        console=console,
     ) as prog:
-        task = prog.add_task("scanning", total=len(files))
-        for path in files:
-            prog.advance(task)
-            spath = str(path)
-            paths_seen.add(spath)
+        # One bar per root so the user sees which network mount is the
+        # current bottleneck. Truncate long paths from the front so the
+        # leaf directory (the part that matters) stays readable.
+        def _short(p: Path) -> str:
+            s = str(p)
+            return s if len(s) <= 60 else "…" + s[-59:]
 
-            try:
-                st = path.stat()
-            except OSError:
-                stats["errors"] += 1
-                continue
+        per_root = [
+            prog.add_task(f"  {_short(r)}", total=None, start=True)
+            for r in roots
+        ]
+        overall = prog.add_task("[bold]processing[/bold]", total=None)
+        per_root_count = [0] * len(roots)
+        per_root_done = [False] * len(roots)
 
-            cached = known.get(spath)
+        pool = ThreadPoolExecutor(
+            max_workers=walk_workers, thread_name_prefix="walk"
+        )
+        for i, r in enumerate(roots):
+            pool.submit(walker, i, r)
 
-            # Fast path: file is known and unchanged. No PIL open, no hash,
-            # no SQL — just count and continue. This is the dominant case
-            # on incremental scans and dictates overall throughput. Both
-            # "unchanged real photo" and "still too small to bother with"
-            # take this path.
-            if cached is not None:
-                m, sz, missing, too_small, fid = cached
-                if m == st.st_mtime and sz == st.st_size:
-                    if missing:
-                        conn.execute("UPDATE files SET missing=0 WHERE id=?", (fid,))
-                    if too_small:
-                        stats["skipped_small"] += 1
-                    else:
-                        stats["unchanged"] += 1
-                    continue
-                # changed — fall through to re-hash / update path below.
-                # Re-apply the size filter; the file's bytes changed, so a
-                # previously-fine photo could have been overwritten with a
-                # thumbnail (or vice versa).
-                if _is_too_small(path, min_pixels):
-                    conn.execute(
-                        """UPDATE files SET size=?, mtime=?, too_small=1
-                           WHERE id=?""",
-                        (st.st_size, st.st_mtime, fid),
+        active = len(roots)
+        processed = 0
+        try:
+            while active > 0:
+                root_idx, payload = path_q.get()
+                if payload is None:
+                    # Walker for this root finished.
+                    active -= 1
+                    per_root_done[root_idx] = True
+                    prog.update(
+                        per_root[root_idx],
+                        description=f"  ✓ {_short(roots[root_idx])} "
+                                    f"({per_root_count[root_idx]} files)",
                     )
-                    stats["skipped_small"] += 1
                     continue
+                if isinstance(payload, Exception):
+                    stats["errors"] += 1
+                    log_msg = f"walker error in {roots[root_idx]}: {payload}"
+                    console.print(f"[red]{log_msg}[/red]")
+                    continue
+
+                path: Path = payload
+                per_root_count[root_idx] += 1
+                prog.update(
+                    per_root[root_idx],
+                    completed=per_root_count[root_idx],
+                    description=f"  {_short(roots[root_idx])} "
+                                f"({per_root_count[root_idx]} files)",
+                )
+                processed += 1
+                prog.update(
+                    overall, completed=processed,
+                    description=f"[bold]processing[/bold] · {processed} seen",
+                )
+
+                spath = str(path)
+                paths_seen.add(spath)
+
                 try:
-                    chash = content_hash(path)
+                    st = path.stat()
                 except OSError:
                     stats["errors"] += 1
                     continue
-                mime = mimetypes.guess_type(spath)[0]
-                conn.execute(
-                    """UPDATE files SET content_hash=?, size=?, mtime=?, mime=?,
-                       indexed_at=?, meta_done=0, yolo_done=0, faces_done=0,
-                       clip_done=0, missing=0, too_small=0
-                       WHERE id=?""",
-                    (chash, st.st_size, st.st_mtime, mime, time.time(), fid),
-                )
-                stats["changed"] += 1
-            else:
-                # New file — apply the size filter (skips iPhoto / Synology
-                # 200×200 thumbnails) before paying for the hash. Tombstone
-                # too-small files so the next scan takes the fast path
-                # without paying for another PIL header read.
-                if _is_too_small(path, min_pixels):
+
+                cached = known.get(spath)
+
+                # Fast path: file is known and unchanged. No PIL open,
+                # no hash, no SQL — just count and continue. This is the
+                # dominant case on incremental scans and dictates
+                # overall throughput. Both "unchanged real photo" and
+                # "still too small to bother with" take this path.
+                if cached is not None:
+                    m, sz, missing, too_small, fid = cached
+                    if m == st.st_mtime and sz == st.st_size:
+                        if missing:
+                            conn.execute("UPDATE files SET missing=0 WHERE id=?", (fid,))
+                        if too_small:
+                            stats["skipped_small"] += 1
+                        else:
+                            stats["unchanged"] += 1
+                        continue
+                    # changed — fall through to re-hash / update path below.
+                    if _is_too_small(path, min_pixels):
+                        conn.execute(
+                            """UPDATE files SET size=?, mtime=?, too_small=1
+                               WHERE id=?""",
+                            (st.st_size, st.st_mtime, fid),
+                        )
+                        stats["skipped_small"] += 1
+                        continue
+                    try:
+                        chash = content_hash(path)
+                    except OSError:
+                        stats["errors"] += 1
+                        continue
                     mime = mimetypes.guess_type(spath)[0]
                     conn.execute(
-                        """INSERT INTO files
-                           (path, content_hash, size, mtime, mime,
-                            indexed_at, too_small)
-                           VALUES (?, '', ?, ?, ?, ?, 1)""",
-                        (spath, st.st_size, st.st_mtime, mime, time.time()),
+                        """UPDATE files SET content_hash=?, size=?, mtime=?, mime=?,
+                           indexed_at=?, meta_done=0, yolo_done=0, faces_done=0,
+                           clip_done=0, missing=0, too_small=0
+                           WHERE id=?""",
+                        (chash, st.st_size, st.st_mtime, mime, time.time(), fid),
                     )
-                    stats["skipped_small"] += 1
-                    continue
-                try:
-                    chash = content_hash(path)
-                except OSError:
-                    stats["errors"] += 1
-                    continue
-
-                # Hash dedupe: if these bytes are already indexed elsewhere,
-                # avoid redoing ML. Prefer a live row (true duplicate) before
-                # considering a tombstoned row (moved file).
-                if dedupe:
-                    live = conn.execute(
-                        """SELECT id, path FROM files
-                           WHERE content_hash = ? AND missing = 0
-                           LIMIT 1""",
-                        (chash,),
-                    ).fetchone()
-                    if live is not None:
-                        # Already indexed at another path — skip outright.
-                        # Count its path as "seen" so --prune doesn't mark
-                        # the canonical copy as missing.
-                        paths_seen.add(live["path"])
-                        stats["dedup_skipped"] += 1
-                        continue
-
-                    dead = conn.execute(
-                        """SELECT id FROM files
-                           WHERE content_hash = ? AND missing = 1
-                           LIMIT 1""",
-                        (chash,),
-                    ).fetchone()
-                    if dead is not None:
-                        # File moved: reuse the existing row so prior ML
-                        # work (detections, faces, CLIP vector) is kept.
+                    stats["changed"] += 1
+                else:
+                    # New file — apply the size filter (skips iPhoto /
+                    # Synology 200×200 thumbnails) before paying for the
+                    # hash. Tombstone too-small files so the next scan
+                    # takes the fast path without paying for another PIL
+                    # header read.
+                    if _is_too_small(path, min_pixels):
                         mime = mimetypes.guess_type(spath)[0]
                         conn.execute(
-                            """UPDATE files
-                               SET path=?, size=?, mtime=?, mime=?,
-                                   missing=0, indexed_at=?
-                               WHERE id=?""",
-                            (spath, st.st_size, st.st_mtime, mime,
-                             time.time(), dead["id"]),
+                            """INSERT INTO files
+                               (path, content_hash, size, mtime, mime,
+                                indexed_at, too_small)
+                               VALUES (?, '', ?, ?, ?, ?, 1)""",
+                            (spath, st.st_size, st.st_mtime, mime, time.time()),
                         )
-                        stats["moved"] += 1
+                        stats["skipped_small"] += 1
+                        continue
+                    try:
+                        chash = content_hash(path)
+                    except OSError:
+                        stats["errors"] += 1
                         continue
 
-                mime = mimetypes.guess_type(spath)[0]
-                conn.execute(
-                    """INSERT INTO files (path, content_hash, size, mtime, mime, indexed_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (spath, chash, st.st_size, st.st_mtime, mime, time.time()),
-                )
-                stats["new"] += 1
+                    # Hash dedupe: if these bytes are already indexed
+                    # elsewhere, avoid redoing ML. Prefer a live row
+                    # (true duplicate) before considering a tombstoned
+                    # row (moved file).
+                    if dedupe:
+                        live = conn.execute(
+                            """SELECT id, path FROM files
+                               WHERE content_hash = ? AND missing = 0
+                               LIMIT 1""",
+                            (chash,),
+                        ).fetchone()
+                        if live is not None:
+                            paths_seen.add(live["path"])
+                            stats["dedup_skipped"] += 1
+                            continue
+
+                        dead = conn.execute(
+                            """SELECT id FROM files
+                               WHERE content_hash = ? AND missing = 1
+                               LIMIT 1""",
+                            (chash,),
+                        ).fetchone()
+                        if dead is not None:
+                            mime = mimetypes.guess_type(spath)[0]
+                            conn.execute(
+                                """UPDATE files
+                                   SET path=?, size=?, mtime=?, mime=?,
+                                       missing=0, indexed_at=?
+                                   WHERE id=?""",
+                                (spath, st.st_size, st.st_mtime, mime,
+                                 time.time(), dead["id"]),
+                            )
+                            stats["moved"] += 1
+                            continue
+
+                    mime = mimetypes.guess_type(spath)[0]
+                    conn.execute(
+                        """INSERT INTO files (path, content_hash, size, mtime, mime, indexed_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (spath, chash, st.st_size, st.st_mtime, mime, time.time()),
+                    )
+                    stats["new"] += 1
+        finally:
+            pool.shutdown(wait=True)
 
     if prune:
         existing_paths = {
@@ -343,6 +429,12 @@ def register(parent: typer.Typer) -> None:
                  "Moved files (same hash, old row tombstoned) are re-pointed "
                  "at the new path so prior ML work is preserved.",
         ),
+        walk_workers: int | None = typer.Option(
+            None, "--walk-workers",
+            help="Threads for the parallel directory walk (default: "
+                 "min(roots, 8)). Useful to raise on multi-mount NAS "
+                 "setups where SMB latency dominates.",
+        ),
     ) -> None:
         """Scan directories for images/videos and populate the file index."""
         cfg = config.load()
@@ -350,7 +442,8 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         try:
             result = scan(paths, conn, prune=prune,
-                          min_pixels=min_pixels, dedupe=dedupe)
+                          min_pixels=min_pixels, dedupe=dedupe,
+                          walk_workers=walk_workers)
             console = Console()
             for k, v in result.items():
                 console.print(f"  {k}: {v}")
@@ -366,6 +459,11 @@ def register(parent: typer.Typer) -> None:
         min_pixels: int = typer.Option(
             MIN_PIXELS_DEFAULT, "--min-pixels",
             help="Skip images where BOTH dimensions are below this.",
+        ),
+        walk_workers: int | None = typer.Option(
+            None, "--walk-workers",
+            help="Threads for the parallel directory walk (default: "
+                 "min(roots, 8)).",
         ),
     ) -> None:
         """Re-scan every directory previously passed to ``scan``.
@@ -404,7 +502,8 @@ def register(parent: typer.Typer) -> None:
             if not roots:
                 console.print("[red]no roots are currently mounted/accessible[/red]")
                 return
-            result = scan(roots, conn, prune=prune, min_pixels=min_pixels)
+            result = scan(roots, conn, prune=prune, min_pixels=min_pixels,
+                          walk_workers=walk_workers)
             for k, v in result.items():
                 console.print(f"  {k}: {v}")
         finally:
