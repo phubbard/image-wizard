@@ -36,6 +36,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     # Crash diagnostics — RSS sampling for the index checkpoint log
     "psutil>=5.9",
+    # Video poster-frame extraction (V1 video support)
+    "av>=12.0",
 ]
 
 [project.optional-dependencies]

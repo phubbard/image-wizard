@@ -196,7 +196,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
             load_count = (page + 1) * per_page
             rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -239,7 +239,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             )
 
             rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -285,7 +285,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         names + multi-cluster splits collapse into one timeline.
         """
         return conn.execute(
-            """SELECT f.id, f.path, f.content_hash,
+            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                       pm.taken_at, pm.camera_model, pm.city, pm.country
                FROM (
                    SELECT DISTINCT fa.file_id AS fid
@@ -700,7 +700,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return rows
         if label:
             return conn.execute(
-                f"""SELECT DISTINCT f.id, f.path, f.content_hash,
+                f"""SELECT DISTINCT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM detections d
                     JOIN files f ON f.id = d.file_id
@@ -712,7 +712,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if person:
             return conn.execute(
-                f"""SELECT DISTINCT f.id, f.path, f.content_hash,
+                f"""SELECT DISTINCT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM faces fa
                     JOIN files f ON f.id = fa.file_id
@@ -724,7 +724,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if cluster is not None:
             return conn.execute(
-                f"""SELECT DISTINCT f.id, f.path, f.content_hash,
+                f"""SELECT DISTINCT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM faces fa
                     JOIN files f ON f.id = fa.file_id
@@ -736,7 +736,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if camera:
             return conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
@@ -747,7 +747,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if country:
             return conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
@@ -1210,7 +1210,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
     def _camera_photos(conn, where, params, limit, offset):
         return conn.execute(
-            f"""SELECT f.id, f.path, f.content_hash, f.width, f.height,
+            f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.width, f.height,
                        pm.taken_at, pm.camera_model, pm.city, pm.country
                 FROM files f
                 JOIN photo_meta pm ON pm.file_id = f.id
@@ -1302,7 +1302,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         lon_min, lon_max = lon - dlon, lon + dlon
 
         rows = conn.execute(
-            """SELECT f.id, f.path, f.content_hash,
+            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
                       pm.taken_at, pm.camera_model, pm.city, pm.country,
                       pm.lat, pm.lon
                FROM photo_meta pm
@@ -1551,9 +1551,14 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return HTMLResponse("source file missing", 404)
 
         try:
-            from .. import decode, thumbs as thumbs_mod
-            arr = decode.load_image(src)
+            from .. import decode
             from ..thumbs import ensure_thumbnail
+            from ..scan import VIDEO_EXTS
+            if src.suffix.lower() in VIDEO_EXTS:
+                from ..video import extract_poster
+                arr, _duration = extract_poster(src)
+            else:
+                arr = decode.load_image(src)
             out = ensure_thumbnail(arr, cfg.cache_dir, content_hash)
             return FileResponse(out, media_type="image/jpeg")
         except Exception as e:
@@ -1561,21 +1566,46 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return HTMLResponse("decode error", 500)
 
     # Formats browsers can render natively in <img>
-    _WEB_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif"})
+    _WEB_IMG_EXTS = frozenset({
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif",
+    })
+    # Formats browsers can play in <video>. Codec compatibility within
+    # MP4/MOV varies (Safari handles HEVC, Chrome doesn't), but the
+    # browser will silently fall back to the poster on a codec it can't
+    # decode — so we ship the file in all these cases and let it sort
+    # itself out client-side.
+    _WEB_VIDEO_EXTS = frozenset({".mp4", ".mov", ".m4v", ".webm"})
+    _VIDEO_MIME = {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
+    }
 
     @app.get("/full/{file_id}")
     async def serve_full(file_id: int):
         conn = get_conn()
         try:
             row = conn.execute(
-                "SELECT path, content_hash FROM files WHERE id=?", (file_id,)
+                "SELECT path, content_hash, kind FROM files WHERE id=?", (file_id,)
             ).fetchone()
             if not row:
                 return HTMLResponse("not found", 404)
             p = Path(row["path"])
-            # For formats browsers can't display (HEIC, RAW, TIFF, ...),
-            # serve the pre-generated JPEG thumbnail instead.
-            if p.suffix.lower() not in _WEB_EXTS:
+            ext = p.suffix.lower()
+
+            # Videos: serve the actual file with a video/* MIME so the
+            # <video> tag can stream it. FastAPI's FileResponse handles
+            # HTTP Range requests automatically, so seeking works.
+            if row["kind"] == "video" or ext in _WEB_VIDEO_EXTS:
+                if not p.exists():
+                    return HTMLResponse("file missing", 404)
+                return FileResponse(p, media_type=_VIDEO_MIME.get(ext, "application/octet-stream"))
+
+            # Images: hand back the source file if the browser can render
+            # it directly; else serve the cached JPEG thumbnail (HEIC,
+            # RAW, TIFF, etc.).
+            if ext not in _WEB_IMG_EXTS:
                 tp = thumb_path(cfg.cache_dir, row["content_hash"])
                 if tp.exists():
                     return FileResponse(tp, media_type="image/jpeg")

@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -212,6 +212,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE files ADD COLUMN too_small INTEGER NOT NULL DEFAULT 0"
         )
+
+    # kind / duration_sec: video support (V1). kind='image' is the legacy
+    # default for any pre-existing row; new scans set it explicitly.
+    # duration_sec is NULL for images, populated for videos at index time
+    # by the poster-frame extractor.
+    if "kind" not in cols:
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'image'"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind)"
+        )
+    if "duration_sec" not in cols:
+        conn.execute("ALTER TABLE files ADD COLUMN duration_sec REAL")
 
 
 def _backfill_persons(conn: sqlite3.Connection) -> None:

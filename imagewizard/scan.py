@@ -38,10 +38,20 @@ RAW_EXTS = frozenset({
 
 VIDEO_EXTS = frozenset({".mov", ".mp4", ".avi", ".mkv", ".m4v"})
 
-# Videos are recognized so we can skip them cleanly, but they are NOT indexed:
-# the ML pipeline can't decode them, so letting them through just produces
-# "cannot identify image file" warnings for every .MOV sibling of a JPG.
-SUPPORTED_EXTS = IMAGE_EXTS
+# Videos are now supported via PyAV + FFmpeg. The pipeline extracts a
+# single poster frame at ~1s and runs the same ML stages on it, so a
+# video's row in `files` looks just like a photo's except for kind=video
+# and a populated duration_sec.
+SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
+
+
+def kind_for_ext(ext: str) -> str:
+    """Return 'video' for known video extensions, otherwise 'image'.
+
+    Used at scan time to set `files.kind` and at decode time to pick
+    between the still-image and video-poster paths.
+    """
+    return "video" if ext.lower() in VIDEO_EXTS else "image"
 
 CHUNK = 1 << 16  # 64 KB hash chunks
 

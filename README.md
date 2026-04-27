@@ -8,6 +8,10 @@ locally, no cloud calls:
 - **InsightFace** — face detection + 512-d ArcFace embeddings, clustered with HDBSCAN for iOS-style "People" albums
 - **OpenCLIP** — text-to-image search ("dog on a beach")
 
+Videos (`.mov`, `.mp4`, `.m4v`) are indexed too — a poster frame at ~1s
+gets the full ML treatment, and the browser plays the file inline via
+`<video>` for compatible codecs.
+
 All metadata, vectors, and thumbnails live in a single SQLite database with
 [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN search.
 
@@ -321,11 +325,6 @@ image-wizard last-crash -n 80 --kernel
 Tracked at the top of this list — anything below has been considered
 but not yet committed to:
 
-- **Video support, V1** — treat each video as a single still by
-  extracting one poster frame, run the existing pipeline on it, render
-  with `<video controls poster="…">` in the browser. Schema gains
-  `files.kind` (`image` / `video`) and `files.duration_sec`. Decode via
-  PyAV (FFmpeg bindings, hardware-accelerated on Apple Silicon).
 - **Video support, V2** — sample N frames per video (1 fps for the
   first minute, then every 10s). New `frames` table; detections / faces
   optionally reference a frame + timestamp. Person timeline shows

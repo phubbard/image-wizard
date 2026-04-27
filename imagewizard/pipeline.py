@@ -154,6 +154,9 @@ class CheckpointLog:
             self._fh.close()
 
 
+VIDEO_EXTS = frozenset({".mov", ".mp4", ".avi", ".mkv", ".m4v"})
+
+
 @dataclass
 class PreparedImage:
     file_id: int
@@ -171,6 +174,9 @@ class PreparedImage:
     needs_faces: bool = False
     needs_clip: bool = False
     error: str | None = None
+    # Set when ``path`` is a video — written into files.duration_sec by
+    # the consumer thread. None for images.
+    duration_sec: float | None = None
 
 
 def _decode_one(
@@ -180,7 +186,13 @@ def _decode_one(
     flags: dict,
     cache_dir: Path,
 ) -> PreparedImage:
-    """Decode image + thumbnail. Runs in a prefetch thread (no exiftool)."""
+    """Decode image (or pluck a video poster) + thumbnail. Runs in a
+    prefetch thread (no exiftool).
+
+    For videos we extract a single frame at ~1 second and treat it as
+    an image for every downstream stage. The full video file is served
+    by the web layer via the existing /full/{id} endpoint.
+    """
     prep = PreparedImage(
         file_id=file_id, path=path, content_hash=content_hash,
         needs_meta=not flags["meta_done"],
@@ -189,7 +201,11 @@ def _decode_one(
         needs_clip=not flags["clip_done"],
     )
     try:
-        prep.img = load_image(path)
+        if path.suffix.lower() in VIDEO_EXTS:
+            from .video import extract_poster
+            prep.img, prep.duration_sec = extract_poster(path)
+        else:
+            prep.img = load_image(path)
         prep.height, prep.width = prep.img.shape[:2]
         ensure_thumbnail(prep.img, cache_dir, content_hash)
     except Exception as e:
@@ -416,8 +432,16 @@ def index_files(
             try:
                 # Dimensions
                 conn.execute(
-                    "UPDATE files SET width=?, height=? WHERE id=?",
-                    (prep.width, prep.height, prep.file_id),
+                    # kind/duration come from the prefetch worker; we
+                    # write them here on the main thread alongside the
+                    # decoded dimensions so all four stay in sync.
+                    "UPDATE files SET width=?, height=?, kind=?, duration_sec=? WHERE id=?",
+                    (
+                        prep.width, prep.height,
+                        "video" if prep.path.suffix.lower() in VIDEO_EXTS else "image",
+                        prep.duration_sec,
+                        prep.file_id,
+                    ),
                 )
 
                 # YOLO (MPS)

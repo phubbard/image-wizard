@@ -165,9 +165,35 @@
             <a href="/full/{{ file['id'] }}" target="_blank" class="full-link">View full image</a>
         </div>
         <div class="img-wrap" id="img-wrap">
+            {% if file['kind'] == 'video' %}
+            {# Native HTML5 player with the poster frame as fallback. The
+               browser only renders if it understands the codec; ProRes
+               and similar will silently fall back to the poster image
+               and the user can click "View full file" to download. The
+               <img id="detail-img"> is hidden but kept in the DOM so the
+               existing bbox-positioning JS still has something to query
+               for natural width/height (we use the poster). #}
+            <video src="/full/{{ file['id'] }}" id="detail-video"
+                   class="detail-img"
+                   poster="/thumb/{{ file['content_hash'] }}"
+                   controls preload="metadata"
+                   style="width:100%;background:#000;border-radius:6px;">
+                Sorry, your browser can't play this codec. Use
+                <a href="/full/{{ file['id'] }}">download</a>.
+            </video>
+            <img src="/thumb/{{ file['content_hash'] }}" id="detail-img"
+                 alt="" onload="placeBboxes()" style="display:none;">
+            {% else %}
             <img src="/full/{{ file['id'] }}" id="detail-img" alt=""
                  onload="placeBboxes()">
+            {% endif %}
 
+            {# Bounding boxes are positioned over the displayed image
+               element. For videos we show a player rather than the
+               poster, so positioning would be wrong; skip the overlays
+               for video detail pages (the sidebar still shows the
+               objects/faces detected on the poster frame). #}
+            {% if file['kind'] != 'video' %}
             {% for d in detections %}
             <div class="bbox det hidden" data-type="det"
                  data-x="{{ d['x'] }}" data-y="{{ d['y'] }}"
@@ -185,6 +211,7 @@
                 <span class="bbox-label">{{ f['person_name'] or 'Click to name' }}</span>
             </div>
             {% endfor %}
+            {% endif %}
         </div>
     </div>
     <div class="sidebar">

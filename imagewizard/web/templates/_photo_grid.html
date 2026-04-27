@@ -2,6 +2,7 @@
 <a id="photo-{{ p['id'] }}" href="/photo/{{ p['id'] }}">
     <img src="/thumb/{{ p['content_hash'] }}" loading="lazy"
          alt="{{ p['taken_at'] or '' }}">
+    {% if p['kind'] == 'video' %}<span class="video-badge">▶ {% if p['duration_sec'] %}{{ '%d:%02d'|format(p['duration_sec']//60, p['duration_sec']%60) }}{% else %}video{% endif %}</span>{% endif %}
     <span class="caption">
         {{ (p['taken_at'] or '')[:10] }}
         {% if p['city'] %} · {{ p['city'] }}{% endif %}
