@@ -251,6 +251,19 @@ If memory is climbing in the ``mem`` snapshots, lower the worker count
 (``--workers 4``) and/or skip CLIP for the first pass
 (``--no-clip``) — CLIP keeps the largest tensors resident.
 
+**Distinguishing crash modes:**
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `last-crash` log ends mid-file, **no crash report in DiagnosticReports** | macOS sent SIGKILL for memory pressure (Jetsam). External kills don't generate reports. | Lower `--workers` (try 4), set `--max-rss-gb` lower than 60% of RAM, run `--no-clip` separately |
+| `last-crash` log ends mid-file, **.ips file in DiagnosticReports** | Native segfault in C extension (Torch/MPS, ONNX, libheif) | Open the `.ips` file — its stack trace points at the offending library. The last `stage` line in the log tells you which model was running |
+| Process exits cleanly with progress finished | Not a crash — that's just completion |
+
+The pipeline auto-throttles: when RSS climbs past `--max-rss-gb`
+(default 60% of system RAM) the prefetch pool stops submitting new
+work and waits for memory to come back down. Throttle events are
+recorded as `throttle` lines in the index log.
+
 ## Typical workflows
 
 ```bash

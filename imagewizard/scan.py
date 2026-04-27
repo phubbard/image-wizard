@@ -76,7 +76,8 @@ def _is_too_small(path: Path, min_pixels: int) -> bool:
 
 
 def discover(roots: list[Path]) -> Iterator[Path]:
-    """Yield supported image paths under *roots*, skipping dot-dirs.
+    """Yield supported image paths under *roots*, skipping dot-dirs and
+    Apple Photos library internals.
 
     No per-file open here — we want enumeration to be cheap so that
     incremental scans (where most files are already indexed and
@@ -84,6 +85,11 @@ def discover(roots: list[Path]) -> Iterator[Path]:
     thumbnail?" check is applied in ``scan()`` only for files that are
     actually new or changed; established files don't pay the cost
     again.
+
+    Skipped subtrees inside `.photoslibrary` packages:
+    Thumbnails / resources / private / external / database / scopes
+    These hold auto-generated previews and metadata; the actual photos
+    live in `originals/`, which we DO want.
     """
     for root in roots:
         root = root.expanduser().resolve()
@@ -92,8 +98,19 @@ def discover(roots: list[Path]) -> Iterator[Path]:
                 yield root
             continue
         for dirpath, dirnames, filenames in os.walk(root):
-            # skip hidden directories
+            # Skip hidden directories.
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            # Inside an Apple Photos library, skip auto-generated subtrees
+            # but keep `originals/` (the real photos). These directories
+            # double-count the library and create face/object duplicates.
+            if ".photoslibrary" in dirpath:
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in {
+                        "Thumbnails", "resources", "private", "external",
+                        "database", "scopes",
+                    }
+                ]
             for fn in filenames:
                 if fn.startswith("."):
                     continue

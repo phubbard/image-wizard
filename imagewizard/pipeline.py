@@ -103,6 +103,16 @@ class CheckpointLog:
     def start(self, file_id: int, path: Path) -> None:
         self._write("start", file_id, path)
 
+    def stage(self, file_id: int, name: str) -> None:
+        """Mark the start of a per-file ML stage (yolo, clip, faces).
+
+        After a silent crash the last 'stage' line in the log identifies
+        which model was running when the process died — tells you
+        whether to suspect MPS/Torch (yolo, clip) vs ONNX (faces) vs
+        decode (no stage line yet for this file).
+        """
+        self._write("stage", file_id, name)
+
     def done(self, file_id: int) -> None:
         self._write("done", file_id)
 
@@ -197,6 +207,13 @@ def _prewarm_models(skip_yolo: bool, skip_faces: bool, skip_clip: bool) -> tuple
     return yolo_detect, face_detect, clip_embed
 
 
+def _system_total_ram_gb() -> float:
+    try:
+        import psutil
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except Exception:
+        return 16.0  # safe assumption
+
 def index_files(
     conn: sqlite3.Connection,
     cfg: config.Config,
@@ -206,6 +223,7 @@ def index_files(
     skip_clip: bool = False,
     workers: int = 4,
     prefetch_depth: int = 8,
+    max_rss_gb: float | None = None,
 ) -> dict[str, int]:
     """Run the ML pipeline with batch metadata, concurrent prefetch, and warm models."""
 
@@ -300,8 +318,41 @@ def index_files(
         prefetch_q: queue.Queue[Future | None] = queue.Queue(maxsize=prefetch_depth)
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="decode")
 
+        # Default RSS ceiling: 60% of system RAM. macOS will start sending
+        # memory-pressure SIGKILLs (Jetsam) well before we'd OOM in the
+        # traditional sense — 60% is a conservative line that leaves room
+        # for the OS, browser, etc. without making indexing pointlessly
+        # slow on a 64GB+ Mac Studio.
+        if max_rss_gb is None:
+            max_rss_gb = max(2.0, _system_total_ram_gb() * 0.60)
+        rss_ceiling_bytes = int(max_rss_gb * 1024 ** 3)
+
+        try:
+            import psutil
+            self_proc = psutil.Process()
+        except Exception:
+            self_proc = None
+        console.print(
+            f"[dim]memory ceiling: {max_rss_gb:.1f} GB "
+            f"(prefetch pauses if RSS exceeds this)[/dim]"
+        )
+
         def submit_prefetch():
             for row in rows:
+                # Throttle: if our RSS has climbed past the ceiling, wait
+                # for it to come back down. Polling is rare here because
+                # the queue itself is bounded by prefetch_depth.
+                if self_proc is not None:
+                    while True:
+                        rss = self_proc.memory_info().rss
+                        if rss < rss_ceiling_bytes:
+                            break
+                        chk._write(
+                            "throttle",
+                            f"rss_mb={rss/1024/1024:.0f}",
+                            f"ceiling_mb={rss_ceiling_bytes/1024/1024:.0f}",
+                        )
+                        time.sleep(0.5)
                 fut = pool.submit(
                     _decode_one,
                     row["id"], Path(row["path"]), row["content_hash"],
@@ -351,6 +402,7 @@ def index_files(
 
                 # YOLO (MPS)
                 if yolo_detect and prep.needs_yolo:
+                    chk.stage(prep.file_id, "yolo")
                     # Clear stale detections from any prior partial run
                     conn.execute("DELETE FROM detections WHERE file_id=?", (prep.file_id,))
                     dets = yolo_detect(prep.img)
@@ -364,6 +416,7 @@ def index_files(
 
                 # CLIP (MPS)
                 if clip_embed and prep.needs_clip:
+                    chk.stage(prep.file_id, "clip")
                     # sqlite-vec virtual tables don't support OR REPLACE
                     conn.execute("DELETE FROM vec_clip WHERE rowid=?", (prep.file_id,))
                     emb = clip_embed(prep.img)
@@ -375,6 +428,7 @@ def index_files(
 
                 # Faces (CPU/ONNX — uses its own thread pool internally)
                 if face_detect and prep.needs_faces:
+                    chk.stage(prep.file_id, "faces")
                     # Clear stale face rows + their vectors from any prior partial run
                     old_face_ids = [
                         r[0] for r in conn.execute(
@@ -434,13 +488,32 @@ def register(parent: typer.Typer) -> None:
         skip_yolo: bool = typer.Option(False, "--no-yolo", help="Skip object detection."),
         skip_faces: bool = typer.Option(False, "--no-faces", help="Skip face detection."),
         skip_clip: bool = typer.Option(False, "--no-clip", help="Skip CLIP embeddings."),
-        workers: int = typer.Option(4, "--workers", "-w", help="Prefetch/decode threads."),
+        workers: int = typer.Option(
+            4, "--workers", "-w",
+            help="Prefetch/decode threads. Higher uses more RAM. Values "
+                 "above 8 risk macOS killing the process for memory "
+                 "pressure (Jetsam) — see README 'Debugging silent crashes'.",
+        ),
         prefetch: int = typer.Option(8, "--prefetch", help="Queue depth for pre-decoded images."),
+        max_rss_gb: float | None = typer.Option(
+            None, "--max-rss-gb",
+            help="Pause the prefetch pool whenever RSS exceeds this many "
+                 "GB. Default: 60%% of system RAM. Lower this if macOS "
+                 "is killing the process for memory pressure.",
+        ),
     ) -> None:
         """Run the ML pipeline on scanned but unindexed files."""
         cfg = config.load()
         db.init(cfg.db_path)
         conn = db.connect(cfg.db_path)
+        if workers > 8:
+            from rich.console import Console
+            Console(stderr=True).print(
+                f"[yellow]warning:[/yellow] --workers={workers} is high. "
+                "On macOS, indices over 8 are commonly SIGKILLed by the "
+                "memory-pressure killer. Consider --workers 4-6 if the "
+                "process keeps disappearing without an error."
+            )
         try:
             result = index_files(
                 conn, cfg,
@@ -450,6 +523,7 @@ def register(parent: typer.Typer) -> None:
                 skip_clip=skip_clip,
                 workers=workers,
                 prefetch_depth=prefetch,
+                max_rss_gb=max_rss_gb,
             )
             db.set_meta(conn, "last_index_at", str(time.time()))
             console = Console()
