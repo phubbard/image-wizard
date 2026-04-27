@@ -179,6 +179,105 @@ class PreparedImage:
     duration_sec: float | None = None
 
 
+def _process_video_frames(
+    prep: "PreparedImage",
+    conn: sqlite3.Connection,
+    yolo_detect,
+    clip_embed,
+    face_detect,
+) -> int:
+    """V2 multi-frame sampling for one video.
+
+    The file-level (poster-frame) detections / faces / CLIP have
+    already been written by the main consumer loop with ``frame_id IS
+    NULL``. This helper layers per-frame data on top: rows in
+    ``frames`` plus per-frame detections, faces, and per-frame CLIP
+    vectors keyed by ``frame_id``.
+
+    Idempotent: existing frame data for this file is wiped before
+    re-population, so a re-index produces the same final state.
+    """
+    from .video import iter_frames
+
+    # Wipe any prior frame-level data for this file before re-populating.
+    old_frame_ids = [
+        r[0] for r in conn.execute(
+            "SELECT id FROM frames WHERE file_id=?", (prep.file_id,)
+        ).fetchall()
+    ]
+    for fid in old_frame_ids:
+        conn.execute("DELETE FROM vec_clip_frames WHERE rowid=?", (fid,))
+    # Detections and faces have ON DELETE CASCADE via the frames FK in
+    # new schemas, but ALTER TABLE ADD COLUMN can't add FKs to an
+    # existing table — clean up explicitly so old DBs don't leak rows.
+    conn.execute(
+        """DELETE FROM detections
+           WHERE frame_id IN (SELECT id FROM frames WHERE file_id=?)""",
+        (prep.file_id,),
+    )
+    # Same for face vectors (vec_faces is a virtual table, no FK).
+    old_face_ids = [
+        r[0] for r in conn.execute(
+            """SELECT id FROM faces
+               WHERE frame_id IN (SELECT id FROM frames WHERE file_id=?)""",
+            (prep.file_id,),
+        ).fetchall()
+    ]
+    for fid in old_face_ids:
+        conn.execute("DELETE FROM vec_faces WHERE rowid=?", (fid,))
+    conn.execute(
+        """DELETE FROM faces
+           WHERE frame_id IN (SELECT id FROM frames WHERE file_id=?)""",
+        (prep.file_id,),
+    )
+    conn.execute("DELETE FROM frames WHERE file_id=?", (prep.file_id,))
+
+    n_frames = 0
+    for ts, rgb, _duration in iter_frames(prep.path):
+        h, w = rgb.shape[:2]
+        cur = conn.execute(
+            "INSERT INTO frames (file_id, ts_sec, width, height) "
+            "VALUES (?, ?, ?, ?)",
+            (prep.file_id, ts, w, h),
+        )
+        frame_id = cur.lastrowid
+        n_frames += 1
+
+        if yolo_detect:
+            for d in yolo_detect(rgb):
+                conn.execute(
+                    "INSERT INTO detections "
+                    "(file_id, frame_id, label, conf, x, y, w, h) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (prep.file_id, frame_id, d.label, d.conf,
+                     d.x, d.y, d.w, d.h),
+                )
+
+        if clip_embed:
+            emb = clip_embed(rgb)
+            conn.execute(
+                "INSERT INTO vec_clip_frames (rowid, embedding) VALUES (?, ?)",
+                (frame_id, _vec_bytes(emb)),
+            )
+
+        if face_detect:
+            for f in face_detect(rgb):
+                x1, y1, x2, y2 = f.bbox
+                nx, ny = x1 / w, y1 / h
+                nw, nh = (x2 - x1) / w, (y2 - y1) / h
+                cur = conn.execute(
+                    "INSERT INTO faces "
+                    "(file_id, frame_id, x, y, w, h, det_score) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (prep.file_id, frame_id, nx, ny, nw, nh, f.det_score),
+                )
+                conn.execute(
+                    "INSERT INTO vec_faces (rowid, embedding) VALUES (?, ?)",
+                    (cur.lastrowid, _vec_bytes(f.embedding)),
+                )
+    return n_frames
+
+
 def _decode_one(
     file_id: int,
     path: Path,
@@ -500,6 +599,25 @@ def index_files(
                             (cur.lastrowid, _vec_bytes(f.embedding)),
                         )
                     conn.execute("UPDATE files SET faces_done=1 WHERE id=?", (prep.file_id,))
+
+                # V2: for videos, additionally sample N frames across the
+                # clip and run the ML stages on each. The file-level work
+                # above gave us a poster-frame summary; this gives per-
+                # frame detail so /person/{id} can show "Alice at 0:23"
+                # and /photo/{id} can render a per-frame film strip.
+                if prep.path.suffix.lower() in VIDEO_EXTS:
+                    chk.stage(prep.file_id, "video-frames")
+                    try:
+                        _process_video_frames(
+                            prep, conn,
+                            yolo_detect, clip_embed, face_detect,
+                        )
+                    except Exception as e:
+                        log.warning(
+                            "video frame extraction failed for %s: %s",
+                            prep.path, e,
+                        )
+                        chk.error(prep.file_id, f"video-frames: {e}")
 
                 prep.img = None  # free early
                 # Drop the metadata entry too — store_metadata already

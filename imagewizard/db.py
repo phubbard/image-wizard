@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -144,6 +144,26 @@ CREATE TABLE IF NOT EXISTS person_names (
 );
 CREATE INDEX IF NOT EXISTS idx_pn_person ON person_names(person_id);
 CREATE INDEX IF NOT EXISTS idx_pn_name   ON person_names(name COLLATE NOCASE);
+
+-- Per-video frame index. V1 video support treated each video as a single
+-- still (poster frame) and stored its detections / faces on the file row
+-- with frame_id IS NULL. V2 samples multiple frames and stores one row
+-- per sampled frame here; per-frame detections / faces / CLIP vectors
+-- reference that frame_id so we can show "Alice at 0:23 in beach.mov".
+CREATE TABLE IF NOT EXISTS frames (
+    id      INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    ts_sec  REAL NOT NULL,    -- seconds into the video
+    width   INTEGER,
+    height  INTEGER,
+    UNIQUE(file_id, ts_sec)
+);
+CREATE INDEX IF NOT EXISTS idx_frames_file ON frames(file_id);
+
+-- CLIP embeddings for individual video frames. Kept separate from
+-- vec_clip (which is keyed by files.id) so the rowid namespaces don't
+-- collide. Search across photos + videos is a UNION ALL query.
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_clip_frames USING vec0(embedding float[512]);
 """
 
 
@@ -226,6 +246,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if "duration_sec" not in cols:
         conn.execute("ALTER TABLE files ADD COLUMN duration_sec REAL")
+
+    # frame_id on detections / faces (V2 video support). NULL means
+    # "applies to the whole file" (legacy photos and V1 video poster
+    # frames). Foreign-key cascade is set in the table definition for
+    # NEW deployments; ALTER TABLE in SQLite can't add FK so existing
+    # databases get the column without a constraint — application code
+    # cleans up frame deletions explicitly.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(detections)")}
+    if "frame_id" not in cols:
+        conn.execute("ALTER TABLE detections ADD COLUMN frame_id INTEGER")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detections_frame ON detections(frame_id)"
+        )
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(faces)")}
+    if "frame_id" not in cols:
+        conn.execute("ALTER TABLE faces ADD COLUMN frame_id INTEGER")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_faces_frame ON faces(frame_id)"
+        )
 
 
 def _backfill_persons(conn: sqlite3.Connection) -> None:

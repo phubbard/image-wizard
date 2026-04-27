@@ -386,9 +386,11 @@ def scan(
 
                     mime = mimetypes.guess_type(spath)[0]
                     conn.execute(
-                        """INSERT INTO files (path, content_hash, size, mtime, mime, indexed_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (spath, chash, st.st_size, st.st_mtime, mime, time.time()),
+                        """INSERT INTO files
+                           (path, content_hash, size, mtime, mime, indexed_at, kind)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (spath, chash, st.st_size, st.st_mtime, mime,
+                         time.time(), kind_for_ext(path.suffix)),
                     )
                     stats["new"] += 1
         finally:
@@ -978,6 +980,100 @@ def register(parent: typer.Typer) -> None:
                     console.print(ln)
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
                 console.print(f"[red]log show failed: {e}[/red]")
+
+    @parent.command(name="list-videos")
+    def cmd_list_videos(
+        list_paths: bool = typer.Option(
+            False, "--list",
+            help="Print every video path. Default: just show the summary.",
+        ),
+        state: str = typer.Option(
+            "all", "--state",
+            help="Filter --list output: all | indexed | pending | failed | unknown.",
+        ),
+    ) -> None:
+        """Survey video files across every scanned root.
+
+        Walks each root in ``scan_roots`` looking for video extensions
+        (.mov / .mp4 / .m4v / .avi / .mkv) and reports each file's state
+        in the DB:
+
+          • indexed   — has run through the ML pipeline (yolo_done=1)
+          • pending   — known to scan but not yet indexed
+          • failed    — tombstoned with decode_failed=1 (run
+                        ``clear-failures`` to retry)
+          • unknown   — present on disk, never seen by ``scan``
+                        (run ``rescan`` to pick them up)
+
+        Useful before kicking off a big ``index`` run on a fresh V2
+        deploy, or to spot-check what the next ``rescan`` will add.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            roots = [
+                Path(r[0]) for r in conn.execute(
+                    "SELECT path FROM scan_roots ORDER BY path"
+                )
+            ]
+            if not roots:
+                console.print("[yellow]no scan_roots recorded[/yellow]")
+                return
+
+            # Pull every known video row into a dict for O(1) per-path lookup.
+            known: dict[str, str] = {}
+            for r in conn.execute(
+                """SELECT path, decode_failed, yolo_done
+                   FROM files
+                   WHERE missing=0 AND kind='video'"""
+            ):
+                if r["decode_failed"]:
+                    known[r["path"]] = "failed"
+                elif r["yolo_done"]:
+                    known[r["path"]] = "indexed"
+                else:
+                    known[r["path"]] = "pending"
+
+            # Walk each root for .mov/.mp4/etc on disk.
+            on_disk: list[tuple[Path, str]] = []
+            for root in roots:
+                if not root.exists():
+                    console.print(f"[dim]skipping unmounted root: {root}[/dim]")
+                    continue
+                console.print(f"[dim]scanning {root}…[/dim]")
+                for p in _walk_one_root(root):
+                    if p.suffix.lower() in VIDEO_EXTS:
+                        sp = str(p)
+                        on_disk.append((p, known.get(sp, "unknown")))
+
+            counts: dict[str, int] = {
+                "indexed": 0, "pending": 0, "failed": 0, "unknown": 0,
+            }
+            for _, st in on_disk:
+                counts[st] = counts.get(st, 0) + 1
+
+            console.print()
+            console.print(f"[bold]{len(on_disk)} video files across {len(roots)} root(s)[/bold]")
+            for k in ("indexed", "pending", "failed", "unknown"):
+                colour = {"indexed": "green", "pending": "yellow",
+                          "failed": "red", "unknown": "cyan"}[k]
+                console.print(f"  [{colour}]{k:9s}[/{colour}] {counts[k]}")
+
+            if list_paths:
+                console.print()
+                shown = 0
+                for p, st in sorted(on_disk):
+                    if state != "all" and st != state:
+                        continue
+                    colour = {"indexed": "green", "pending": "yellow",
+                              "failed": "red", "unknown": "cyan"}[st]
+                    console.print(f"  [{colour}]{st:9s}[/{colour}] {p}")
+                    shown += 1
+                if shown == 0:
+                    console.print(f"[dim]no videos matched --state={state}[/dim]")
+        finally:
+            conn.close()
 
     @parent.command(name="list-failures")
     def cmd_list_failures(

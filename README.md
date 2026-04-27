@@ -8,9 +8,12 @@ locally, no cloud calls:
 - **InsightFace** — face detection + 512-d ArcFace embeddings, clustered with HDBSCAN for iOS-style "People" albums
 - **OpenCLIP** — text-to-image search ("dog on a beach")
 
-Videos (`.mov`, `.mp4`, `.m4v`) are indexed too — a poster frame at ~1s
-gets the full ML treatment, and the browser plays the file inline via
-`<video>` for compatible codecs.
+Videos (`.mov`, `.mp4`, `.m4v`) are indexed too — multiple frames are
+sampled (1 fps for the first 60s, then every 10s; capped at 600 per
+video) and each gets the full ML treatment. Per-frame detections,
+faces, and CLIP embeddings let you ask "where in this video?" and
+"who appears in this video?" with timestamps. The browser plays the
+file inline via `<video>` for compatible codecs.
 
 All metadata, vectors, and thumbnails live in a single SQLite database with
 [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN search.
@@ -94,6 +97,13 @@ image-wizard scan ~/A /Volumes/B --walk-workers 16
 image-wizard rescan
 image-wizard rescan --no-prune                # don't tombstone missing files
 image-wizard rescan --walk-workers 16         # raise concurrency for NAS
+
+# Survey video files across every scanned root: how many on disk vs
+# indexed / pending / failed / never-seen. Useful before kicking off a
+# big index run on a fresh V2 deploy.
+image-wizard list-videos
+image-wizard list-videos --list                # also dump every path
+image-wizard list-videos --list --state failed # just the tombstoned ones
 
 # Run the ML pipeline on files that have been scanned but not yet indexed
 image-wizard index                            # full pipeline, resumable
@@ -333,10 +343,13 @@ image-wizard last-crash -n 80 --kernel
 Tracked at the top of this list — anything below has been considered
 but not yet committed to:
 
-- **Video support, V2** — sample N frames per video (1 fps for the
-  first minute, then every 10s). New `frames` table; detections / faces
-  optionally reference a frame + timestamp. Person timeline shows
-  "Alice at 0:23 in beach.mov".
+- **Video support, V2 — UI surfacing in progress.** Backend has
+  landed: per-frame `frames` table, `frame_id` columns on
+  `detections`/`faces`, new `vec_clip_frames` virtual table for
+  per-frame CLIP, multi-frame sampling in the pipeline. Still to land:
+  film strip on the photo detail page, per-frame timestamps on the
+  person timeline ("Alice at 0:23 in beach.mov"), search returning
+  in-video moments.
 - **Video support, V3+** — scene-cut detection, audio transcription via
   whisper.cpp, speaker identification.
 - **Search across name aliases** — currently `/search?person=Amy Smith`
