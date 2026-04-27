@@ -278,121 +278,28 @@ def scan(
                 )
 
                 spath = str(path)
+                # Dedupe within a single scan. With overlapping roots
+                # (e.g. /Volumes/photo and /Volumes/photo/107_PANA) the
+                # parallel walkers will yield the same path multiple
+                # times. Without this guard the second visit sees
+                # cached=None (the `known` dict was loaded once at the
+                # start) and tries to re-INSERT, hitting the path
+                # UNIQUE constraint.
+                if spath in paths_seen:
+                    continue
                 paths_seen.add(spath)
 
+                # Wrap the whole per-path body so a single broken file
+                # never aborts a multi-hour scan. We've burnt entire
+                # 250k-file runs on a single IntegrityError before.
                 try:
-                    st = path.stat()
-                except OSError:
+                    _process_one_path(
+                        path, spath, conn, known,
+                        paths_seen, stats, min_pixels, dedupe,
+                    )
+                except Exception as e:
+                    log.warning("scan failed for %s: %s", spath, e)
                     stats["errors"] += 1
-                    continue
-
-                cached = known.get(spath)
-
-                # Fast path: file is known and unchanged. No PIL open,
-                # no hash, no SQL — just count and continue. This is the
-                # dominant case on incremental scans and dictates
-                # overall throughput. Both "unchanged real photo" and
-                # "still too small to bother with" take this path.
-                if cached is not None:
-                    m, sz, missing, too_small, fid = cached
-                    if m == st.st_mtime and sz == st.st_size:
-                        if missing:
-                            conn.execute("UPDATE files SET missing=0 WHERE id=?", (fid,))
-                        if too_small:
-                            stats["skipped_small"] += 1
-                        else:
-                            stats["unchanged"] += 1
-                        continue
-                    # changed — fall through to re-hash / update path below.
-                    if _is_too_small(path, min_pixels):
-                        conn.execute(
-                            """UPDATE files SET size=?, mtime=?, too_small=1
-                               WHERE id=?""",
-                            (st.st_size, st.st_mtime, fid),
-                        )
-                        stats["skipped_small"] += 1
-                        continue
-                    try:
-                        chash = content_hash(path)
-                    except OSError:
-                        stats["errors"] += 1
-                        continue
-                    mime = mimetypes.guess_type(spath)[0]
-                    conn.execute(
-                        """UPDATE files SET content_hash=?, size=?, mtime=?, mime=?,
-                           indexed_at=?, meta_done=0, yolo_done=0, faces_done=0,
-                           clip_done=0, missing=0, too_small=0
-                           WHERE id=?""",
-                        (chash, st.st_size, st.st_mtime, mime, time.time(), fid),
-                    )
-                    stats["changed"] += 1
-                else:
-                    # New file — apply the size filter (skips iPhoto /
-                    # Synology 200×200 thumbnails) before paying for the
-                    # hash. Tombstone too-small files so the next scan
-                    # takes the fast path without paying for another PIL
-                    # header read.
-                    if _is_too_small(path, min_pixels):
-                        mime = mimetypes.guess_type(spath)[0]
-                        conn.execute(
-                            """INSERT INTO files
-                               (path, content_hash, size, mtime, mime,
-                                indexed_at, too_small)
-                               VALUES (?, '', ?, ?, ?, ?, 1)""",
-                            (spath, st.st_size, st.st_mtime, mime, time.time()),
-                        )
-                        stats["skipped_small"] += 1
-                        continue
-                    try:
-                        chash = content_hash(path)
-                    except OSError:
-                        stats["errors"] += 1
-                        continue
-
-                    # Hash dedupe: if these bytes are already indexed
-                    # elsewhere, avoid redoing ML. Prefer a live row
-                    # (true duplicate) before considering a tombstoned
-                    # row (moved file).
-                    if dedupe:
-                        live = conn.execute(
-                            """SELECT id, path FROM files
-                               WHERE content_hash = ? AND missing = 0
-                               LIMIT 1""",
-                            (chash,),
-                        ).fetchone()
-                        if live is not None:
-                            paths_seen.add(live["path"])
-                            stats["dedup_skipped"] += 1
-                            continue
-
-                        dead = conn.execute(
-                            """SELECT id FROM files
-                               WHERE content_hash = ? AND missing = 1
-                               LIMIT 1""",
-                            (chash,),
-                        ).fetchone()
-                        if dead is not None:
-                            mime = mimetypes.guess_type(spath)[0]
-                            conn.execute(
-                                """UPDATE files
-                                   SET path=?, size=?, mtime=?, mime=?,
-                                       missing=0, indexed_at=?
-                                   WHERE id=?""",
-                                (spath, st.st_size, st.st_mtime, mime,
-                                 time.time(), dead["id"]),
-                            )
-                            stats["moved"] += 1
-                            continue
-
-                    mime = mimetypes.guess_type(spath)[0]
-                    conn.execute(
-                        """INSERT INTO files
-                           (path, content_hash, size, mtime, mime, indexed_at, kind)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (spath, chash, st.st_size, st.st_mtime, mime,
-                         time.time(), kind_for_ext(path.suffix)),
-                    )
-                    stats["new"] += 1
         finally:
             pool.shutdown(wait=True)
 
@@ -408,6 +315,138 @@ def scan(
         stats["missing"] = len(gone)
 
     return stats
+
+
+def _process_one_path(
+    path: Path,
+    spath: str,
+    conn,
+    known: dict,
+    paths_seen: set,
+    stats: dict,
+    min_pixels: int,
+    dedupe: bool,
+) -> None:
+    """One-file body of the scan loop.
+
+    Pulled out of ``scan()`` so a per-file failure (filesystem race,
+    integrity hiccup) can be caught without killing a multi-hour
+    scan. Updates to ``stats`` / ``paths_seen`` / ``known`` happen
+    in place; ``known`` is updated after every successful INSERT/
+    UPDATE so a duplicate emission of the same path within a single
+    scan (e.g. from overlapping roots) takes the fast path on its
+    second visit.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        stats["errors"] += 1
+        return
+
+    cached = known.get(spath)
+    now = time.time()
+    mime = mimetypes.guess_type(spath)[0]
+
+    # Fast path: file is known and unchanged. No PIL open, no hash,
+    # no SQL — just count and return. Dominant case on incremental
+    # scans.
+    if cached is not None:
+        m, sz, missing, too_small, fid = cached
+        if m == st.st_mtime and sz == st.st_size:
+            if missing:
+                conn.execute("UPDATE files SET missing=0 WHERE id=?", (fid,))
+                known[spath] = (m, sz, 0, too_small, fid)
+            if too_small:
+                stats["skipped_small"] += 1
+            else:
+                stats["unchanged"] += 1
+            return
+
+        # Changed — re-apply size filter and re-hash.
+        if _is_too_small(path, min_pixels):
+            conn.execute(
+                """UPDATE files SET size=?, mtime=?, too_small=1 WHERE id=?""",
+                (st.st_size, st.st_mtime, fid),
+            )
+            known[spath] = (st.st_mtime, st.st_size, 0, 1, fid)
+            stats["skipped_small"] += 1
+            return
+        try:
+            chash = content_hash(path)
+        except OSError:
+            stats["errors"] += 1
+            return
+        conn.execute(
+            """UPDATE files SET content_hash=?, size=?, mtime=?, mime=?,
+                   indexed_at=?, meta_done=0, yolo_done=0, faces_done=0,
+                   clip_done=0, missing=0, too_small=0
+               WHERE id=?""",
+            (chash, st.st_size, st.st_mtime, mime, now, fid),
+        )
+        known[spath] = (st.st_mtime, st.st_size, 0, 0, fid)
+        stats["changed"] += 1
+        return
+
+    # New file. Apply size filter; tombstone too-small entries so
+    # the next scan takes the fast path with no PIL header read.
+    if _is_too_small(path, min_pixels):
+        cur = conn.execute(
+            """INSERT INTO files
+               (path, content_hash, size, mtime, mime, indexed_at, too_small)
+               VALUES (?, '', ?, ?, ?, ?, 1)""",
+            (spath, st.st_size, st.st_mtime, mime, now),
+        )
+        known[spath] = (st.st_mtime, st.st_size, 0, 1, cur.lastrowid)
+        stats["skipped_small"] += 1
+        return
+    try:
+        chash = content_hash(path)
+    except OSError:
+        stats["errors"] += 1
+        return
+
+    # Hash dedupe: if these bytes are already indexed elsewhere,
+    # avoid redoing ML. Prefer a live row (true duplicate) before
+    # considering a tombstoned row (moved file).
+    if dedupe:
+        live = conn.execute(
+            """SELECT id, path FROM files
+               WHERE content_hash = ? AND missing = 0
+               LIMIT 1""",
+            (chash,),
+        ).fetchone()
+        if live is not None:
+            paths_seen.add(live["path"])
+            stats["dedup_skipped"] += 1
+            return
+
+        dead = conn.execute(
+            """SELECT id FROM files
+               WHERE content_hash = ? AND missing = 1
+               LIMIT 1""",
+            (chash,),
+        ).fetchone()
+        if dead is not None:
+            conn.execute(
+                """UPDATE files
+                   SET path=?, size=?, mtime=?, mime=?,
+                       missing=0, indexed_at=?
+                   WHERE id=?""",
+                (spath, st.st_size, st.st_mtime, mime, now, dead["id"]),
+            )
+            known[spath] = (st.st_mtime, st.st_size, 0, 0, dead["id"])
+            stats["moved"] += 1
+            return
+
+    cur = conn.execute(
+        """INSERT INTO files
+           (path, content_hash, size, mtime, mime, indexed_at, kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (spath, chash, st.st_size, st.st_mtime, mime, now,
+         kind_for_ext(path.suffix)),
+    )
+    known[spath] = (st.st_mtime, st.st_size, 0, 0, cur.lastrowid)
+    stats["new"] += 1
 
 
 # ---- CLI registration ----

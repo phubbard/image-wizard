@@ -88,7 +88,10 @@ image-wizard scan ~/A /Volumes/B --walk-workers 16
                                               # own thread. Big win on multi-mount
                                               # SMB / NFS setups where directory
                                               # latency dominates. Defaults to
-                                              # min(roots, 8).
+                                              # min(roots, 8). Overlapping roots
+                                              # (e.g. /Volumes/photo and
+                                              # /Volumes/photo/Camera) are safe —
+                                              # paths are deduped per scan.
 
 # Re-scan every directory you've ever scanned (reads the scan_roots
 # table — no need to retype paths). Skips unmounted roots so an
