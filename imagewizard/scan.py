@@ -728,31 +728,43 @@ def register(parent: typer.Typer) -> None:
     @parent.command(name="last-crash")
     def cmd_last_crash(
         tail: int = typer.Option(40, "--tail", "-n", help="Lines to show."),
+        kernel: bool = typer.Option(
+            False, "--kernel",
+            help="Also dump recent macOS kernel log entries mentioning "
+                 "Python / image-wizard (slow — runs `log show`).",
+        ),
     ) -> None:
-        """Show the tail of the index checkpoint log.
+        """Show the tail of the index checkpoint log + faulthandler dump.
 
         Use this after a silent crash (segfault, OOM kill, supervisor
-        kill) to see exactly which file was being processed at the
-        moment of death and the recent memory trajectory. The log lives
-        at ``<cache_dir>/logs/index.log`` — append-only, fsync'd after
-        every write so the last entry survives a hard kill.
+        kill) to see exactly which file/stage was active at the moment
+        of death and any native-code traceback that fired.
 
-        Lines are space-separated:
-          <unix_ts> start  <file_id> <path>
-          <unix_ts> done   <file_id>
-          <unix_ts> error  <file_id> <message>
-          <unix_ts> mem    processed=N rss_mb=M
+        Files inspected:
+          <cache>/logs/index.log         per-file lifecycle + memory snapshots
+          <cache>/logs/faulthandler.log  Python frames at SIGSEGV/SIGABRT/SIGTERM
+
+        Lines in index.log:
+          <unix_ts> start    <file_id> <path>
+          <unix_ts> stage    <file_id> {yolo|clip|faces}
+          <unix_ts> done     <file_id>
+          <unix_ts> error    <file_id> <message>
+          <unix_ts> mem      processed=N rss_mb=M
+          <unix_ts> throttle rss_mb=M ceiling_mb=C
         """
+        import subprocess
         cfg = config.load()
-        log_path = cfg.cache_dir / "logs" / "index.log"
+        log_dir = cfg.cache_dir / "logs"
         console = Console()
-        if not log_path.exists():
-            console.print(f"[yellow]no log at {log_path}[/yellow]")
+
+        index_log = log_dir / "index.log"
+        if not index_log.exists():
+            console.print(f"[yellow]no log at {index_log}[/yellow]")
             console.print("Run `image-wizard index` first.")
             return
-        console.print(f"[dim]{log_path}[/dim]")
-        # Read the tail without slurping the whole file
-        with log_path.open("rb") as f:
+
+        console.print(f"[bold]checkpoint log:[/bold] [dim]{index_log}[/dim]")
+        with index_log.open("rb") as f:
             f.seek(0, 2)
             size = f.tell()
             block = min(size, 64 * 1024)
@@ -762,12 +774,48 @@ def register(parent: typer.Typer) -> None:
         for ln in lines:
             if " error " in ln:
                 console.print(f"[red]{ln}[/red]")
-            elif " mem " in ln:
+            elif " stage " in ln:
+                console.print(f"[magenta]{ln}[/magenta]")
+            elif " mem " in ln or " throttle " in ln:
                 console.print(f"[cyan]{ln}[/cyan]")
             elif ln.startswith(("---",)) or " ---" in ln:
                 console.print(f"[bold yellow]{ln}[/bold yellow]")
             else:
                 console.print(ln)
+
+        fh_log = log_dir / "faulthandler.log"
+        if fh_log.exists() and fh_log.stat().st_size > 0:
+            console.print(f"\n[bold]faulthandler dump:[/bold] [dim]{fh_log}[/dim]")
+            console.print("[yellow](native-code traceback — last 100 lines)[/yellow]")
+            text = fh_log.read_text(errors="replace").splitlines()[-100:]
+            for ln in text:
+                console.print(ln)
+        else:
+            console.print(
+                "\n[dim](no faulthandler.log — process wasn't terminated by "
+                "a signal Python could trap)[/dim]"
+            )
+
+        if kernel:
+            console.print("\n[bold]kernel events (last hour):[/bold]")
+            try:
+                pred = (
+                    'eventMessage CONTAINS[c] "image-wizard" '
+                    'OR eventMessage CONTAINS[c] "imagewizard" '
+                    'OR (process == "kernel" AND eventMessage CONTAINS "memorystatus") '
+                    'OR (process == "kernel" AND eventMessage CONTAINS "Jetsam")'
+                )
+                out = subprocess.run(
+                    ["log", "show", "--last", "1h", "--predicate", pred],
+                    capture_output=True, text=True, timeout=30,
+                )
+                lines = (out.stdout or "").splitlines()
+                if not lines:
+                    console.print("[dim]no relevant kernel events[/dim]")
+                for ln in lines[-50:]:
+                    console.print(ln)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                console.print(f"[red]log show failed: {e}[/red]")
 
     @parent.command(name="list-failures")
     def cmd_list_failures(

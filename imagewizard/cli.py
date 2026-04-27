@@ -16,11 +16,37 @@ from rich.table import Table
 
 from . import config, db
 
-# Dump a Python stack trace on native crashes (SIGSEGV, SIGABRT, etc).
-# Without this, a segfault in pillow-heif / onnxruntime / MPS drops the
-# process with zero diagnostics. With it, we get the Python frame that
-# was executing at crash time.
-faulthandler.enable(file=sys.stderr, all_threads=True)
+# Dump a Python stack trace on native crashes (SIGSEGV, SIGABRT, etc) to
+# both stderr AND a durable file. Stderr alone isn't reliable: Rich's
+# progress display continuously rewrites the terminal and a multi-line
+# fault dump can flash and disappear before the user sees it. The file
+# version always survives.
+#
+# We also dump on SIGTERM/SIGUSR1 so kernel-initiated kills (memory
+# pressure, supervisor termination) leave a Python-level breadcrumb of
+# what every thread was doing. SIGKILL can't be intercepted — for that
+# kind of death look at `image-wizard last-crash` and `log show ...`.
+def _enable_faulthandler() -> None:
+    try:
+        from . import config as _cfg
+        log_dir = _cfg.load().cache_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        f = open(log_dir / "faulthandler.log", "a", buffering=1)
+    except Exception:
+        f = sys.stderr
+    faulthandler.enable(file=f, all_threads=True)
+    # Best-effort: dump on receipt of SIGTERM (graceful kill) and SIGUSR1
+    # (so the user can `kill -USR1 <pid>` to snapshot a hung process).
+    import signal
+    for sig in (signal.SIGTERM, getattr(signal, "SIGUSR1", None)):
+        if sig is None:
+            continue
+        try:
+            faulthandler.register(sig, file=f, all_threads=True, chain=False)
+        except (ValueError, OSError):
+            pass
+
+_enable_faulthandler()
 
 app = typer.Typer(
     name="image-wizard",

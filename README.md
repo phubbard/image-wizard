@@ -251,13 +251,30 @@ If memory is climbing in the ``mem`` snapshots, lower the worker count
 (``--workers 4``) and/or skip CLIP for the first pass
 (``--no-clip``) — CLIP keeps the largest tensors resident.
 
+**Diagnostic workflow after a silent death:**
+
+```bash
+# Per-file lifecycle, native traceback, and recent kernel events
+image-wizard last-crash -n 80 --kernel
+```
+
+The output combines three sources: the `index.log` checkpoint (last
+file + stage in flight, recent RSS), the `faulthandler.log` (Python
+frames at SIGSEGV/SIGABRT/SIGTERM — survives Rich's progress redraw
+because it's written to a dedicated file), and `log show --last 1h`
+filtered to image-wizard / Jetsam events.
+
 **Distinguishing crash modes:**
 
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `last-crash` log ends mid-file, **no crash report in DiagnosticReports** | macOS sent SIGKILL for memory pressure (Jetsam). External kills don't generate reports. | Lower `--workers` (try 4), set `--max-rss-gb` lower than 60% of RAM, run `--no-clip` separately |
-| `last-crash` log ends mid-file, **.ips file in DiagnosticReports** | Native segfault in C extension (Torch/MPS, ONNX, libheif) | Open the `.ips` file — its stack trace points at the offending library. The last `stage` line in the log tells you which model was running |
-| Process exits cleanly with progress finished | Not a crash — that's just completion |
+| Symptom | Likely cause | Next step |
+|---------|-------------|-----------|
+| Last log line is `start <id>` (no `stage`) | Died during decode (libheif on a malformed HEIC, network mount disconnect on `/Volumes/...`, file descriptor exhaustion) | Try `ulimit -n 8192` before `index`, or `--no-faces --no-clip` to bisect |
+| Last log line is `stage <id> {yolo,clip}` | MPS/Torch crash — flaky on long runs | Lower `--workers`, run `--no-clip` separately, or set `PYTORCH_ENABLE_MPS_FALLBACK=1` |
+| Last log line is `stage <id> faces` | ONNX runtime / InsightFace | Same: lower workers, isolate with `--no-faces` |
+| `faulthandler.log` has a Python traceback | Native segfault — the traceback points at the C extension that did it | Open the named library's stack frame |
+| No traceback, `log show` mentions `memorystatus`/`Jetsam` | OS killed for memory pressure | Lower `--max-rss-gb` |
+| No traceback, no kernel event, no .ips file | External signal (terminal close, supervisor, sleep) | Run under `caffeinate -i` and `nohup`/`tmux`, check `last` output |
+| `.ips` file in `~/Library/Logs/DiagnosticReports/` | True native crash | The `.ips` stack trace identifies the offending library |
 
 The pipeline auto-throttles: when RSS climbs past `--max-rss-gb`
 (default 60% of system RAM) the prefetch pool stops submitting new
