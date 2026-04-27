@@ -24,6 +24,7 @@ every 250 processed files to catch slow leaks early.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import queue
@@ -57,6 +58,22 @@ META_BATCH = 200  # exiftool batch size
 # fine; a leak typically grows by ~1 MB per file when it does, so 250
 # files is enough resolution to spot it early.
 MEM_SNAPSHOT_EVERY = 250
+# How often to flush MPS / ONNX / Python caches so slow third-party
+# leaks don't accumulate unbounded over multi-hour runs.
+GC_EVERY = 500
+
+
+def _flush_native_caches() -> None:
+    """Best-effort: nudge PyTorch MPS, ONNX, and CPython GC to free cached
+    intermediate buffers. Each call is harmless even if the relevant
+    library isn't loaded; failures are swallowed."""
+    try:
+        import torch
+        if hasattr(torch, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+    gc.collect()
 
 
 def _vec_bytes(arr: np.ndarray) -> bytes:
@@ -332,9 +349,12 @@ def index_files(
             self_proc = psutil.Process()
         except Exception:
             self_proc = None
+        # Informational only — this is the ceiling at which the prefetch
+        # pool *would* throttle, not actual usage. Typical resident set
+        # is a few GB (models + a handful of in-flight decodes).
         console.print(
-            f"[dim]memory ceiling: {max_rss_gb:.1f} GB "
-            f"(prefetch pauses if RSS exceeds this)[/dim]"
+            f"[dim]throttle ceiling: {max_rss_gb:.1f} GB (informational; "
+            f"actual RSS is logged every {MEM_SNAPSHOT_EVERY} files)[/dim]"
         )
 
         def submit_prefetch():
@@ -458,10 +478,19 @@ def index_files(
                     conn.execute("UPDATE files SET faces_done=1 WHERE id=?", (prep.file_id,))
 
                 prep.img = None  # free early
+                # Drop the metadata entry too — store_metadata already
+                # persisted it and we won't look it up again this run.
+                meta_map.pop(prep.file_id, None)
                 stats["processed"] += 1
                 chk.done(prep.file_id)
                 if stats["processed"] % MEM_SNAPSHOT_EVERY == 0:
                     chk.memory(stats["processed"])
+                if stats["processed"] % GC_EVERY == 0:
+                    # Periodic flush of MPS/ONNX caches + Python cycle GC
+                    # so slow third-party leaks don't accumulate over
+                    # multi-hour runs.
+                    _flush_native_caches()
+                    chk.memory(stats["processed"])  # snapshot after flush
 
             except Exception as e:
                 log.warning("error processing %s: %s", prep.path, e)
