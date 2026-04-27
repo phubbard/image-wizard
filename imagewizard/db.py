@@ -204,6 +204,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "decode_error" not in cols:
         conn.execute("ALTER TABLE files ADD COLUMN decode_error TEXT")
 
+    # too_small: tombstone for files that fail the dimension filter (icon
+    # cache, Synology auto-generated thumbnails, screenshots of dialog
+    # boxes...). Recording them once means the next scan recognises the
+    # path immediately and skips the expensive PIL header read.
+    if "too_small" not in cols:
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN too_small INTEGER NOT NULL DEFAULT 0"
+        )
+
 
 def _backfill_persons(conn: sqlite3.Connection) -> None:
     """For each existing distinct person_name on face_clusters, create one

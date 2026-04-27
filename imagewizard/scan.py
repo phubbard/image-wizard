@@ -75,15 +75,21 @@ def _is_too_small(path: Path, min_pixels: int) -> bool:
         return False
 
 
-def discover(roots: list[Path], min_pixels: int = MIN_PIXELS_DEFAULT) -> Iterator[Path]:
-    """Yield supported image/video paths under *roots*, skipping dot-dirs
-    and images smaller than *min_pixels* in both dimensions."""
+def discover(roots: list[Path]) -> Iterator[Path]:
+    """Yield supported image paths under *roots*, skipping dot-dirs.
+
+    No per-file open here — we want enumeration to be cheap so that
+    incremental scans (where most files are already indexed and
+    unchanged) finish quickly. The dimension-based "is this a
+    thumbnail?" check is applied in ``scan()`` only for files that are
+    actually new or changed; established files don't pay the cost
+    again.
+    """
     for root in roots:
         root = root.expanduser().resolve()
         if root.is_file():
             if root.suffix.lower() in SUPPORTED_EXTS:
-                if not _is_too_small(root, min_pixels):
-                    yield root
+                yield root
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             # skip hidden directories
@@ -92,9 +98,7 @@ def discover(roots: list[Path], min_pixels: int = MIN_PIXELS_DEFAULT) -> Iterato
                 if fn.startswith("."):
                     continue
                 if Path(fn).suffix.lower() in SUPPORTED_EXTS:
-                    p = Path(dirpath) / fn
-                    if not _is_too_small(p, min_pixels):
-                        yield p
+                    yield Path(dirpath) / fn
 
 
 def scan(
@@ -130,7 +134,21 @@ def scan(
         )
 
     paths_seen: set[str] = set()
-    files = list(discover(roots, min_pixels=min_pixels))
+    files = list(discover(roots))
+
+    # Pre-load every known (path → mtime, size, missing, too_small, id)
+    # into memory. The hot path is then a Python dict lookup instead of
+    # one indexed-but-still-non-trivial SQL query per file. For a 4M-file
+    # library this is ~500 MB of Python objects but trades comfortably
+    # against tens of millions of avoided SQLite round trips per
+    # incremental scan.
+    known: dict[str, tuple[float, int, int, int, int]] = {}
+    for r in conn.execute(
+        "SELECT path, mtime, size, missing, too_small, id FROM files"
+    ):
+        known[r["path"]] = (
+            r["mtime"], r["size"], r["missing"], r["too_small"], r["id"],
+        )
 
     with Progress(
         SpinnerColumn(),
@@ -151,21 +169,35 @@ def scan(
                 stats["errors"] += 1
                 continue
 
-            row = conn.execute(
-                "SELECT id, mtime, size, content_hash FROM files WHERE path = ?",
-                (spath,),
-            ).fetchone()
+            cached = known.get(spath)
 
-            if row is not None:
-                if row["mtime"] == st.st_mtime and row["size"] == st.st_size:
-                    # unchanged — make sure it's not tombstoned
-                    if conn.execute(
-                        "SELECT missing FROM files WHERE id=?", (row["id"],)
-                    ).fetchone()["missing"]:
-                        conn.execute("UPDATE files SET missing=0 WHERE id=?", (row["id"],))
-                    stats["unchanged"] += 1
+            # Fast path: file is known and unchanged. No PIL open, no hash,
+            # no SQL — just count and continue. This is the dominant case
+            # on incremental scans and dictates overall throughput. Both
+            # "unchanged real photo" and "still too small to bother with"
+            # take this path.
+            if cached is not None:
+                m, sz, missing, too_small, fid = cached
+                if m == st.st_mtime and sz == st.st_size:
+                    if missing:
+                        conn.execute("UPDATE files SET missing=0 WHERE id=?", (fid,))
+                    if too_small:
+                        stats["skipped_small"] += 1
+                    else:
+                        stats["unchanged"] += 1
                     continue
-                # changed — recompute hash, reset stage flags
+                # changed — fall through to re-hash / update path below.
+                # Re-apply the size filter; the file's bytes changed, so a
+                # previously-fine photo could have been overwritten with a
+                # thumbnail (or vice versa).
+                if _is_too_small(path, min_pixels):
+                    conn.execute(
+                        """UPDATE files SET size=?, mtime=?, too_small=1
+                           WHERE id=?""",
+                        (st.st_size, st.st_mtime, fid),
+                    )
+                    stats["skipped_small"] += 1
+                    continue
                 try:
                     chash = content_hash(path)
                 except OSError:
@@ -175,13 +207,27 @@ def scan(
                 conn.execute(
                     """UPDATE files SET content_hash=?, size=?, mtime=?, mime=?,
                        indexed_at=?, meta_done=0, yolo_done=0, faces_done=0,
-                       clip_done=0, missing=0
+                       clip_done=0, missing=0, too_small=0
                        WHERE id=?""",
-                    (chash, st.st_size, st.st_mtime, mime, time.time(), row["id"]),
+                    (chash, st.st_size, st.st_mtime, mime, time.time(), fid),
                 )
                 stats["changed"] += 1
             else:
-                # new file (no row by path)
+                # New file — apply the size filter (skips iPhoto / Synology
+                # 200×200 thumbnails) before paying for the hash. Tombstone
+                # too-small files so the next scan takes the fast path
+                # without paying for another PIL header read.
+                if _is_too_small(path, min_pixels):
+                    mime = mimetypes.guess_type(spath)[0]
+                    conn.execute(
+                        """INSERT INTO files
+                           (path, content_hash, size, mtime, mime,
+                            indexed_at, too_small)
+                           VALUES (?, '', ?, ?, ?, ?, 1)""",
+                        (spath, st.st_size, st.st_mtime, mime, time.time()),
+                    )
+                    stats["skipped_small"] += 1
+                    continue
                 try:
                     chash = content_hash(path)
                 except OSError:
@@ -339,11 +385,13 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         console = Console()
         try:
-            # Find content_hashes that appear more than once on live (missing=0) rows.
+            # Find content_hashes that appear more than once on live (missing=0)
+            # rows. Exclude too_small tombstones (they all carry an empty hash
+            # by convention so they'd otherwise group together as "duplicates").
             hashes = conn.execute(
                 """SELECT content_hash, COUNT(*) AS cnt
                    FROM files
-                   WHERE missing = 0
+                   WHERE missing = 0 AND too_small = 0 AND content_hash != ''
                    GROUP BY content_hash
                    HAVING cnt > 1
                    ORDER BY cnt DESC"""

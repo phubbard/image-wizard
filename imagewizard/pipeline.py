@@ -220,12 +220,12 @@ def index_files(
     where_parts.append("meta_done=0")
 
     where = " OR ".join(where_parts)
-    # decode_failed=0: skip files we've already failed to decode. The user
-    # can clear the flag with `image-wizard clear-failures` after fixing or
-    # replacing the source file, then re-run index.
+    # Skip files we've already failed to decode (clearable via
+    # `image-wizard clear-failures`) and files tombstoned as too small to
+    # be worth indexing (Synology / iPhoto auto-thumbnails).
     query = (
         "SELECT id, path, content_hash, meta_done, yolo_done, faces_done, clip_done "
-        f"FROM files WHERE missing=0 AND decode_failed=0 AND ({where})"
+        f"FROM files WHERE missing=0 AND decode_failed=0 AND too_small=0 AND ({where})"
     )
     if limit:
         query += f" LIMIT {limit}"
