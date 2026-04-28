@@ -108,6 +108,19 @@ image-wizard list-videos
 image-wizard list-videos --list                # also dump every path
 image-wizard list-videos --list --state failed # just the tombstoned ones
 
+# Tombstone a single file so the ML pipeline skips it. Use when one
+# specific file crashes the indexer and you want to keep going. Accepts
+# id, content_hash, full path, or path substring.
+image-wizard skip 253751
+image-wizard skip 'P1050349_face0.jpg' --reason "InsightFace native crash"
+
+# Bulk purge auto-generated photo-library thumbnails left over from
+# pre-exclusion scans (iPhoto Library/Thumbnails, .photoslibrary
+# resources, *_face0.jpg per-face crops). Always preview with
+# --dry-run first.
+image-wizard cleanup-thumbnails --dry-run
+image-wizard cleanup-thumbnails
+
 # Run the ML pipeline on files that have been scanned but not yet indexed
 image-wizard index                            # full pipeline, resumable
 image-wizard index -n 1000                    # limit to N files this run

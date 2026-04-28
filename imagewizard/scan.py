@@ -91,6 +91,38 @@ def _is_too_small(path: Path, min_pixels: int) -> bool:
         return False
 
 
+import re
+
+# Filenames that are *always* auto-generated crop thumbnails — never
+# real photos. iPhoto / Photos extract `<name>_face0.jpg` etc. for
+# every detected face and litter them throughout the library; running
+# our own face detector on them is at best wasted work and at worst
+# crashes InsightFace's ONNX runtime (we lost a 7000-file pipeline run
+# to one `P1050349_face0.jpg` doing exactly that).
+_GENERATED_CROP_PATTERN = re.compile(r"_face\d+\.(jpg|jpeg|png)$", re.IGNORECASE)
+
+# Subtrees inside an Apple photo library (modern .photoslibrary
+# bundles AND older iPhoto Library directories) that hold
+# auto-generated previews / metadata / face crops / per-album caches.
+# We keep `originals/` (modern) and `Originals/` (iPhoto) so the real
+# photos still get indexed.
+_PHOTO_LIBRARY_SKIP_DIRS = frozenset({
+    # modern .photoslibrary
+    "Thumbnails", "resources", "private", "external",
+    "database", "scopes",
+    # iPhoto Library
+    "Data", "Faces", "Caches", "iPod Photo Cache",
+    "Auto Import", "Trash", "Auto Save",
+    "Library6.iPhoto", "ProjectDBVersion",
+})
+
+
+def _is_inside_photo_library(dirpath: str) -> bool:
+    """True if dirpath is anywhere under an Apple photo library bundle."""
+    lower = dirpath.lower()
+    return ".photoslibrary" in lower or "iphoto library" in lower
+
+
 def _walk_one_root(root: Path) -> Iterator[Path]:
     """Yield supported image paths under a single root.
 
@@ -98,10 +130,12 @@ def _walk_one_root(root: Path) -> Iterator[Path]:
     scans finish quickly. The dimension-based "is this a thumbnail?"
     check happens in ``scan()`` for new/changed files only.
 
-    Skipped subtrees inside `.photoslibrary` packages:
-    Thumbnails / resources / private / external / database / scopes —
-    auto-generated previews and metadata. The actual photos live in
-    `originals/`, which we keep.
+    Skipped subtrees inside `.photoslibrary` and `iPhoto Library`
+    bundles: Thumbnails / Faces / Data / resources / etc. — auto-
+    generated previews and metadata. Real photos live in `originals/`
+    (modern) or `Originals/` (iPhoto), which we keep. Per-face crop
+    files (`*_face0.jpg`) are also skipped — they crash InsightFace
+    when fed back through it.
     """
     root = root.expanduser().resolve()
     if root.is_file():
@@ -110,16 +144,14 @@ def _walk_one_root(root: Path) -> Iterator[Path]:
         return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-        if ".photoslibrary" in dirpath:
+        if _is_inside_photo_library(dirpath):
             dirnames[:] = [
-                d for d in dirnames
-                if d not in {
-                    "Thumbnails", "resources", "private", "external",
-                    "database", "scopes",
-                }
+                d for d in dirnames if d not in _PHOTO_LIBRARY_SKIP_DIRS
             ]
         for fn in filenames:
             if fn.startswith("."):
+                continue
+            if _GENERATED_CROP_PATTERN.search(fn):
                 continue
             if Path(fn).suffix.lower() in SUPPORTED_EXTS:
                 yield Path(dirpath) / fn
@@ -1111,6 +1143,104 @@ def register(parent: typer.Typer) -> None:
                     shown += 1
                 if shown == 0:
                     console.print(f"[dim]no videos matched --state={state}[/dim]")
+        finally:
+            conn.close()
+
+    @parent.command(name="skip")
+    def cmd_skip(
+        target: str = typer.Argument(
+            ...,
+            help="File id (integer), content hash, or path/path-substring.",
+        ),
+        reason: str = typer.Option(
+            "manually skipped",
+            "--reason",
+            help="Stored in decode_error so you remember why later.",
+        ),
+    ) -> None:
+        """Tombstone one file so the pipeline skips it.
+
+        Useful when a single file crashes the indexer and you want to
+        keep going. The file stays in the DB but every ML stage skips
+        it. Reverse with `clear-failures`.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            row = None
+            if target.isdigit():
+                row = conn.execute(
+                    "SELECT id, path FROM files WHERE id=?", (int(target),)
+                ).fetchone()
+            if row is None and len(target) == 64:
+                row = conn.execute(
+                    "SELECT id, path FROM files WHERE content_hash=?", (target,)
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT id, path FROM files WHERE path = ? OR path LIKE ? LIMIT 1",
+                    (target, f"%{target}%"),
+                ).fetchone()
+            if row is None:
+                console.print(f"[red]no file matches {target!r}[/red]")
+                raise typer.Exit(1)
+            conn.execute(
+                "UPDATE files SET decode_failed=1, decode_error=? WHERE id=?",
+                (reason[:500], row["id"]),
+            )
+            console.print(
+                f"[green]skipped[/green] file #{row['id']}: {row['path']}"
+            )
+            console.print(f"  reason: {reason}")
+            console.print("Run `image-wizard clear-failures` to undo.")
+        finally:
+            conn.close()
+
+    @parent.command(name="cleanup-thumbnails")
+    def cmd_cleanup_thumbnails(
+        dry_run: bool = typer.Option(
+            False, "--dry-run",
+            help="Show what would be removed without changing the DB.",
+        ),
+    ) -> None:
+        """Remove auto-generated photo-library thumbnails from the index.
+
+        Older scans (before iPhoto Library exclusion landed) indexed
+        files under `iPhoto Library/Thumbnails/...` and per-face crop
+        files (`*_face0.jpg`). They're auto-generated, useless for
+        search, and one of them just crashed an entire 7000-file index
+        run. This drops them from `files`; CASCADEs handle detections /
+        faces / vec_clip rows.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            rows = conn.execute(
+                """SELECT id, path FROM files
+                   WHERE path LIKE '%iPhoto Library/Thumbnails/%'
+                      OR path LIKE '%.photoslibrary/Thumbnails/%'
+                      OR path LIKE '%.photoslibrary/resources/%'
+                      OR path LIKE '%_face0.jpg'
+                      OR path LIKE '%_face0.jpeg'
+                      OR path LIKE '%_face1.jpg'
+                      OR path LIKE '%_face2.jpg'
+                      OR path LIKE '%_face3.jpg'"""
+            ).fetchall()
+            console.print(f"[bold]{len(rows)} candidate row(s)[/bold]")
+            for r in rows[:20]:
+                console.print(f"  #{r['id']:7d}  {r['path']}")
+            if len(rows) > 20:
+                console.print(f"  ... and {len(rows) - 20} more")
+            if dry_run:
+                console.print("[yellow]dry-run — nothing deleted[/yellow]")
+                return
+            if not rows:
+                return
+            for r in rows:
+                conn.execute("DELETE FROM files WHERE id=?", (r["id"],))
+            console.print(f"[green]deleted {len(rows)} row(s)[/green]")
         finally:
             conn.close()
 
