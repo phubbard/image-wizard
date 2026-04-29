@@ -123,6 +123,32 @@ def _is_inside_photo_library(dirpath: str) -> bool:
     return ".photoslibrary" in lower or "iphoto library" in lower
 
 
+def delete_file_row(conn, file_id: int) -> None:
+    """Delete a files row plus the sqlite-vec virtual-table rows that
+    won't be reached by CASCADE.
+
+    ``faces`` and ``detections`` go away via the foreign-key cascade
+    on ``files``, but ``vec_clip``, ``vec_clip_frames`` and
+    ``vec_faces`` are virtual tables — no FK, no cascade. A bare
+    ``DELETE FROM files`` orphans their rowids, and a future face/
+    embedding INSERT eventually picks one of those rowids and dies
+    with ``UNIQUE constraint failed``.
+
+    Use this helper everywhere a files row is deleted. Idempotent if
+    the row is already gone.
+    """
+    conn.execute("DELETE FROM vec_clip WHERE rowid=?", (file_id,))
+    for fr in conn.execute(
+        "SELECT id FROM frames WHERE file_id=?", (file_id,)
+    ).fetchall():
+        conn.execute("DELETE FROM vec_clip_frames WHERE rowid=?", (fr[0],))
+    for fa in conn.execute(
+        "SELECT id FROM faces WHERE file_id=?", (file_id,)
+    ).fetchall():
+        conn.execute("DELETE FROM vec_faces WHERE rowid=?", (fa[0],))
+    conn.execute("DELETE FROM files WHERE id=?", (file_id,))
+
+
 def _walk_one_root(root: Path) -> Iterator[Path]:
     """Yield supported image paths under a single root.
 
@@ -599,7 +625,7 @@ def register(parent: typer.Typer) -> None:
             dropped = 0
             for r in rows:
                 if r["width"] < min_pixels and r["height"] < min_pixels:
-                    conn.execute("DELETE FROM files WHERE id=?", (r["id"],))
+                    delete_file_row(conn, r["id"])
                     dropped += 1
             Console().print(f"  dropped: {dropped} small images (< {min_pixels}px)")
         finally:
@@ -704,8 +730,10 @@ def register(parent: typer.Typer) -> None:
                             p = Path(r["path"])
                             if p.exists():
                                 p.unlink()
-                            # ON DELETE CASCADE cleans detections/faces/vec rows
-                            conn.execute("DELETE FROM files WHERE id=?", (r["id"],))
+                            # CASCADE cleans detections / faces, but not the
+                            # sqlite-vec virtual tables — delete_file_row
+                            # handles those manually.
+                            delete_file_row(conn, r["id"])
                             removed += 1
                             freed_bytes += r["size"] or 0
                         except OSError as e:
@@ -730,21 +758,26 @@ def register(parent: typer.Typer) -> None:
     def cmd_drop_videos() -> None:
         """Remove video files (.mov, .mp4, ...) that earlier scans indexed.
 
-        Videos are no longer scanned, but rows from prior runs need a cleanup
-        pass. This deletes them outright — ON DELETE CASCADE clears detections,
-        faces, and vector rows too.
+        Mostly historical: V1 video support re-enabled .mov/.mp4 indexing,
+        so this command is now an opt-out for users who don't want videos
+        indexed. CASCADE handles detections / faces; the helper also
+        cleans the sqlite-vec virtual tables so we don't leave orphan
+        embedding rows behind.
         """
         cfg = config.load()
         conn = db.connect(cfg.db_path)
         try:
             like = " OR ".join(["LOWER(path) LIKE ?"] * len(VIDEO_EXTS))
             params = [f"%{e}" for e in VIDEO_EXTS]
-            n = conn.execute(
-                f"SELECT COUNT(*) FROM files WHERE {like}", params
-            ).fetchone()[0]
-            conn.execute(f"DELETE FROM files WHERE {like}", params)
+            ids = [
+                r[0] for r in conn.execute(
+                    f"SELECT id FROM files WHERE {like}", params
+                ).fetchall()
+            ]
+            for fid in ids:
+                delete_file_row(conn, fid)
             conn.commit()
-            Console().print(f"  dropped: {n} video rows")
+            Console().print(f"  dropped: {len(ids)} video rows")
         finally:
             conn.close()
 
@@ -1197,6 +1230,71 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="purge-orphans")
+    def cmd_purge_orphans(
+        dry_run: bool = typer.Option(
+            False, "--dry-run",
+            help="Count orphans without changing the DB.",
+        ),
+    ) -> None:
+        """Delete orphan rows from sqlite-vec virtual tables.
+
+        ``vec_clip``, ``vec_clip_frames`` and ``vec_faces`` are
+        virtual tables and don't get touched by ``ON DELETE CASCADE``
+        — when a ``files`` row is deleted (e.g. by ``cleanup-thumbnails``,
+        ``drop-small``, ``find-duplicates --delete``) the matching
+        face rows go away via cascade but the corresponding vector
+        rows stay behind. As ``faces.id`` autoincrement walks past
+        the orphan rowids, new INSERTs collide with them →
+        ``UNIQUE constraint failed on vec_faces primary key``.
+
+        This sweeps the orphans. Cheap and safe to run any time;
+        the pipeline now also DELETE-before-INSERTs each rowid so
+        new orphans don't accumulate.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            # vec_clip rowid = files.id
+            vec_clip_orphans = conn.execute(
+                """SELECT rowid FROM vec_clip
+                   WHERE rowid NOT IN (SELECT id FROM files)"""
+            ).fetchall()
+            # vec_faces rowid = faces.id
+            vec_faces_orphans = conn.execute(
+                """SELECT rowid FROM vec_faces
+                   WHERE rowid NOT IN (SELECT id FROM faces)"""
+            ).fetchall()
+            # vec_clip_frames rowid = frames.id
+            vec_frames_orphans = conn.execute(
+                """SELECT rowid FROM vec_clip_frames
+                   WHERE rowid NOT IN (SELECT id FROM frames)"""
+            ).fetchall()
+
+            console.print(
+                f"[bold]orphan vector rows:[/bold] "
+                f"vec_clip={len(vec_clip_orphans)}, "
+                f"vec_faces={len(vec_faces_orphans)}, "
+                f"vec_clip_frames={len(vec_frames_orphans)}"
+            )
+            if dry_run:
+                console.print("[yellow]dry-run — nothing deleted[/yellow]")
+                return
+
+            for r in vec_clip_orphans:
+                conn.execute("DELETE FROM vec_clip WHERE rowid=?", (r[0],))
+            for r in vec_faces_orphans:
+                conn.execute("DELETE FROM vec_faces WHERE rowid=?", (r[0],))
+            for r in vec_frames_orphans:
+                conn.execute("DELETE FROM vec_clip_frames WHERE rowid=?", (r[0],))
+            console.print(
+                f"[green]deleted {len(vec_clip_orphans) + len(vec_faces_orphans) + len(vec_frames_orphans)}"
+                f" orphan row(s)[/green]"
+            )
+        finally:
+            conn.close()
+
     @parent.command(name="cleanup-thumbnails")
     def cmd_cleanup_thumbnails(
         dry_run: bool = typer.Option(
@@ -1239,7 +1337,7 @@ def register(parent: typer.Typer) -> None:
             if not rows:
                 return
             for r in rows:
-                conn.execute("DELETE FROM files WHERE id=?", (r["id"],))
+                delete_file_row(conn, r["id"])
             console.print(f"[green]deleted {len(rows)} row(s)[/green]")
         finally:
             conn.close()

@@ -121,6 +121,15 @@ image-wizard skip 'P1050349_face0.jpg' --reason "InsightFace native crash"
 image-wizard cleanup-thumbnails --dry-run
 image-wizard cleanup-thumbnails
 
+# Sweep orphan rows from the sqlite-vec virtual tables. Older
+# delete-paths (drop-small, drop-videos, find-duplicates --delete,
+# pre-fix cleanup-thumbnails) didn't reach vec_clip / vec_faces /
+# vec_clip_frames because virtual tables don't honour ON DELETE
+# CASCADE. Orphans eventually trigger "UNIQUE constraint failed on
+# vec_faces primary key" during indexing.
+image-wizard purge-orphans --dry-run
+image-wizard purge-orphans
+
 # Run the ML pipeline on files that have been scanned but not yet indexed
 image-wizard index                            # full pipeline, resumable
 image-wizard index -n 1000                    # limit to N files this run

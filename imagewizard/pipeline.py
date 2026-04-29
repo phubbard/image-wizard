@@ -255,6 +255,13 @@ def _process_video_frames(
 
         if clip_embed:
             emb = clip_embed(rgb)
+            # Defensive delete first: vec_clip_frames has no FK to
+            # frames, so a previous orphan at this rowid could still be
+            # there. INSERT into a vec0 virtual table fails with UNIQUE
+            # if the rowid is taken; OR REPLACE isn't supported.
+            conn.execute(
+                "DELETE FROM vec_clip_frames WHERE rowid=?", (frame_id,)
+            )
             conn.execute(
                 "INSERT INTO vec_clip_frames (rowid, embedding) VALUES (?, ?)",
                 (frame_id, _vec_bytes(emb)),
@@ -270,6 +277,9 @@ def _process_video_frames(
                     "(file_id, frame_id, x, y, w, h, det_score) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (prep.file_id, frame_id, nx, ny, nw, nh, f.det_score),
+                )
+                conn.execute(
+                    "DELETE FROM vec_faces WHERE rowid=?", (cur.lastrowid,)
                 )
                 conn.execute(
                     "INSERT INTO vec_faces (rowid, embedding) VALUES (?, ?)",
@@ -593,6 +603,14 @@ def index_files(
                             "INSERT INTO faces (file_id, x, y, w, h, det_score) "
                             "VALUES (?, ?, ?, ?, ?, ?)",
                             (prep.file_id, nx, ny, nw, nh, f.det_score),
+                        )
+                        # Defensive: vec_faces has no FK to faces, so an
+                        # orphan from a prior CASCADE deletion of files
+                        # could still occupy this rowid. DELETE before
+                        # INSERT clears it (no-op if no orphan).
+                        conn.execute(
+                            "DELETE FROM vec_faces WHERE rowid=?",
+                            (cur.lastrowid,)
                         )
                         conn.execute(
                             "INSERT INTO vec_faces (rowid, embedding) VALUES (?, ?)",
