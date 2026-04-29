@@ -12,8 +12,11 @@ Videos (`.mov`, `.mp4`, `.m4v`) are indexed too — multiple frames are
 sampled (1 fps for the first 60s, then every 10s; capped at 600 per
 video) and each gets the full ML treatment. Per-frame detections,
 faces, and CLIP embeddings let you ask "where in this video?" and
-"who appears in this video?" with timestamps. The browser plays the
-file inline via `<video>` for compatible codecs.
+"who appears in this video?" with timestamps. Sparse-keyframe codecs
+(some older `.mov` files) yield fewer unique frames than requested
+because consecutive seek targets snap to the same keyframe — that's
+normal and the indexer dedupes them. The browser plays the file
+inline via `<video>` for compatible codecs.
 
 All metadata, vectors, and thumbnails live in a single SQLite database with
 [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN search.

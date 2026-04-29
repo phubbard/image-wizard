@@ -235,11 +235,20 @@ def _process_video_frames(
     n_frames = 0
     for ts, rgb, _duration in iter_frames(prep.path):
         h, w = rgb.shape[:2]
+        # OR IGNORE belt-and-braces: iter_frames already dedupes
+        # actual PTS values to one decimal-ms, but if a future caller
+        # (or a quirky container) produces a (file_id, ts) pair we've
+        # already inserted in this run, we silently skip rather than
+        # crashing the whole video.
         cur = conn.execute(
-            "INSERT INTO frames (file_id, ts_sec, width, height) "
+            "INSERT OR IGNORE INTO frames (file_id, ts_sec, width, height) "
             "VALUES (?, ?, ?, ?)",
             (prep.file_id, ts, w, h),
         )
+        if cur.rowcount == 0:
+            # Duplicate (file_id, ts_sec) — skip ML work for a frame
+            # we've already processed in this iteration.
+            continue
         frame_id = cur.lastrowid
         n_frames += 1
 

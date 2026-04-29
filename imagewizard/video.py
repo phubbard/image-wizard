@@ -197,8 +197,16 @@ def iter_frames(
             else frame_schedule(duration_sec)
         )
 
+        # Track the actual PTS values we've already yielded. With a
+        # codec whose keyframe interval > our schedule step (older
+        # H.264 / MJPEG / some 2014-era iPhone .mov clips), consecutive
+        # seeks land on the same keyframe and we'd otherwise yield the
+        # same physical frame twice — wasting the ML work *and*
+        # triggering a UNIQUE(file_id, ts_sec) failure when the
+        # consumer tries to INSERT both.
+        yielded_pts: set[float] = set()
+
         for ts in targets:
-            # Bound the seek target so we don't run off the end.
             seek_target = ts
             if duration_sec is not None and duration_sec > 0:
                 seek_target = min(seek_target, duration_sec - 0.05)
@@ -218,6 +226,15 @@ def iter_frames(
                 if frame.pts is not None and stream.time_base is not None
                 else seek_target
             )
+            # Round to ms so floating-point noise doesn't defeat the
+            # set-membership check (PyAV's PTS computations are
+            # deterministic but the float math leading to `actual`
+            # isn't bit-exact across runs).
+            key = round(actual, 3)
+            if key in yielded_pts:
+                continue
+            yielded_pts.add(key)
+
             rgb = frame.to_ndarray(format="rgb24")
             rgb = _downscale(rgb, max_pixels)
             yield actual, rgb, duration_sec
