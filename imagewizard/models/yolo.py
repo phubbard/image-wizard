@@ -48,26 +48,42 @@ def detect(
     model_name: str = "yolo11n.pt",
 ) -> list[Detection]:
     """Run YOLO on an RGB image array and return detections."""
-    model = _load(model_name)
-    results = model(img, verbose=False, conf=conf_threshold)
+    return detect_batch([img], conf_threshold=conf_threshold, model_name=model_name)[0]
 
-    dets: list[Detection] = []
+
+def detect_batch(
+    imgs: list[np.ndarray],
+    conf_threshold: float = 0.3,
+    model_name: str = "yolo11n.pt",
+) -> list[list[Detection]]:
+    """Run YOLO on a batch of RGB images. Returns one detection list per input.
+
+    Ultralytics handles list-of-arrays natively and runs them through the
+    network in a single forward pass — on MPS this is roughly 2–4× faster
+    per image than serial inference at batch sizes of 4–16.
+    """
+    if not imgs:
+        return []
+    model = _load(model_name)
+    results = model(imgs, verbose=False, conf=conf_threshold)
+
+    out: list[list[Detection]] = []
     for r in results:
         h_img, w_img = r.orig_shape
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            cls_id = int(box.cls[0])
-            label = model.names[cls_id]
-            conf = float(box.conf[0])
-            # xyxy → normalized center + wh
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            dets.append(Detection(
-                label=label,
-                conf=conf,
-                x=(x1 + x2) / 2 / w_img,
-                y=(y1 + y2) / 2 / h_img,
-                w=(x2 - x1) / w_img,
-                h=(y2 - y1) / h_img,
-            ))
-    return dets
+        per_image: list[Detection] = []
+        if r.boxes is not None:
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                label = model.names[cls_id]
+                conf = float(box.conf[0])
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                per_image.append(Detection(
+                    label=label,
+                    conf=conf,
+                    x=(x1 + x2) / 2 / w_img,
+                    y=(y1 + y2) / 2 / h_img,
+                    w=(x2 - x1) / w_img,
+                    h=(y2 - y1) / h_img,
+                ))
+        out.append(per_image)
+    return out

@@ -169,6 +169,27 @@ CREATE INDEX IF NOT EXISTS idx_frames_file ON frames(file_id);
 -- vec_clip (which is keyed by files.id) so the rowid namespaces don't
 -- collide. Search across photos + videos is a UNION ALL query.
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_clip_frames USING vec0(embedding float[512]);
+
+-- sqlite-vec virtual tables can't carry foreign keys, so ON DELETE
+-- CASCADE on files / faces / frames doesn't reach vec_clip /
+-- vec_faces / vec_clip_frames. Orphans accumulate, and because
+-- INTEGER PRIMARY KEY recycles via max(id)+1, a fresh face_id
+-- eventually collides with an orphan rowid → "UNIQUE constraint
+-- failed on vec_faces primary key" during indexing. These triggers
+-- propagate every delete (including cascades) into the matching
+-- vector table so the rowid namespaces can never diverge.
+CREATE TRIGGER IF NOT EXISTS trg_files_del_vec_clip
+AFTER DELETE ON files BEGIN
+    DELETE FROM vec_clip WHERE rowid = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_faces_del_vec_faces
+AFTER DELETE ON faces BEGIN
+    DELETE FROM vec_faces WHERE rowid = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_frames_del_vec_clip_frames
+AFTER DELETE ON frames BEGIN
+    DELETE FROM vec_clip_frames WHERE rowid = OLD.id;
+END;
 """
 
 

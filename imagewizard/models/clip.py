@@ -42,17 +42,29 @@ def _load() -> None:
 
 def embed_image(img: np.ndarray) -> np.ndarray:
     """Embed an RGB uint8 image → (512,) float32 L2-normalized."""
+    return embed_image_batch([img])[0]
+
+
+def embed_image_batch(imgs: list[np.ndarray]) -> list[np.ndarray]:
+    """Embed a batch of RGB uint8 images → list of (512,) float32 L2-normalized.
+
+    Stacks preprocessed tensors and runs a single forward pass — at batch
+    sizes ≥4 this is materially faster than serial inference on MPS.
+    """
+    if not imgs:
+        return []
     _load()
     from PIL import Image
 
-    pil_img = Image.fromarray(img)
-    tensor = _preprocess(pil_img).unsqueeze(0).to(_device)
+    tensors = [_preprocess(Image.fromarray(im)) for im in imgs]
+    batch = torch.stack(tensors).to(_device)
 
     with torch.no_grad(), torch.amp.autocast(_device):
-        feat = _model.encode_image(tensor)
-        feat = feat / feat.norm(dim=-1, keepdim=True)
+        feats = _model.encode_image(batch)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
 
-    return feat.squeeze(0).cpu().numpy().astype(np.float32)
+    arr = feats.cpu().numpy().astype(np.float32)
+    return [arr[i] for i in range(arr.shape[0])]
 
 
 def embed_text(text: str) -> np.ndarray:

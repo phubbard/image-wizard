@@ -44,8 +44,13 @@ def _load() -> object:
 
     from insightface.app import FaceAnalysis
 
-    log.info("loading InsightFace buffalo_l")
-    _app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    # Prefer Apple's CoreML ML compute units (Neural Engine + GPU) for
+    # detection + embedding; ONNX Runtime auto-falls-back to CPU for
+    # any op CoreML can't handle. On Apple Silicon this is materially
+    # faster than CPU-only for buffalo_l.
+    providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    log.info("loading InsightFace buffalo_l (providers=%s)", providers)
+    _app = FaceAnalysis(name="buffalo_l", providers=providers)
     _app.prepare(ctx_id=0, det_size=(640, 640))
     return _app
 

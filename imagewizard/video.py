@@ -11,13 +11,12 @@ Sampling default: 1 fps for the first 60 seconds, then 1 frame every
 10 seconds. Deterministic — re-indexing produces the same timestamps
 so on-disk thumb caches and frame rows stay valid.
 
-Decoding goes through PyAV (Python bindings to FFmpeg). On Apple
-Silicon FFmpeg uses VideoToolbox hardware decode for H.264 / HEVC;
-ProRes and other codecs fall back to software but still work.
-
-We don't validate codec compatibility here — that's the web layer's
-job (it picks `<video>` vs poster image based on the path's
-extension).
+Decoding goes through OpenCV's VideoCapture, which is FFmpeg under
+the hood — the same FFmpeg ultralytics already ships in cv2's
+.dylibs. Using cv2 here (rather than a second FFmpeg bundle via
+pyav) avoids the macOS ObjC class-duplication warning for
+``AVFFrameReceiver`` / ``libavdevice``, and keeps the install ~30 MB
+smaller.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ import logging
 from pathlib import Path
 from typing import Iterator
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -53,24 +53,78 @@ def frame_schedule(duration_sec: float | None) -> list[float]:
     if not duration_sec or duration_sec <= 0:
         return [DEFAULT_POSTER_SEC]
     out: list[float] = []
-    # Phase 1: dense sampling near the start.
     t = 0.0
     while t < min(duration_sec, DENSE_FPS_SECONDS):
         out.append(round(t, 3))
         t += 1.0 / DENSE_FPS
-    # Phase 2: sparse sampling for the rest.
     t = max(t, DENSE_FPS_SECONDS)
     while t < duration_sec:
         out.append(round(t, 3))
         t += SPARSE_INTERVAL
     if len(out) > MAX_FRAMES_PER_VIDEO:
-        # Keep the dense start, sparsen the tail by even subsample.
         head = out[:MAX_FRAMES_PER_VIDEO // 2]
         tail = out[MAX_FRAMES_PER_VIDEO // 2:]
         step = max(1, len(tail) // (MAX_FRAMES_PER_VIDEO - len(head)))
         out = head + tail[::step]
         out = out[:MAX_FRAMES_PER_VIDEO]
     return out
+
+
+def _open(path: Path) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        cap.release()
+        raise RuntimeError(f"cannot open video {path.name}")
+    return cap
+
+
+def _duration_seconds(cap: cv2.VideoCapture) -> float | None:
+    """Compute duration from FPS × frame_count.
+
+    Some containers report one but not the other; some report zeros.
+    Returns None in those cases so callers can fall back to the
+    poster timestamp.
+    """
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    n_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if fps > 0 and n_frames > 0:
+        return n_frames / fps
+    return None
+
+
+def _decode_at(
+    cap: cv2.VideoCapture, seek_target_sec: float
+) -> tuple[np.ndarray, float] | None:
+    """Seek to ``seek_target_sec`` and decode one frame.
+
+    Returns ``(rgb_uint8_HxWx3, actual_ts_sec)`` or ``None`` if no
+    frame could be decoded. cv2 returns BGR; we convert to RGB to
+    match the rest of the pipeline.
+    """
+    cap.set(cv2.CAP_PROP_POS_MSEC, seek_target_sec * 1000.0)
+    ok, bgr = cap.read()
+    if not ok or bgr is None:
+        return None
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    # POS_MSEC after a successful read() reports the *next* frame
+    # position. Stepping back one frame would require knowing fps; for
+    # the dedup-by-ms set membership we want the position at decode
+    # time, so subtract one frame interval if we have fps.
+    pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps > 0:
+        pos_ms -= 1000.0 / fps
+    return rgb, max(pos_ms / 1000.0, 0.0)
+
+
+def _downscale(rgb: np.ndarray, max_pixels: int) -> np.ndarray:
+    h, w = rgb.shape[:2]
+    if h * w <= max_pixels:
+        return rgb
+    scale = (max_pixels / (h * w)) ** 0.5
+    new_w, new_h = int(w * scale), int(h * scale)
+    pil = Image.fromarray(rgb).resize((new_w, new_h), Image.LANCZOS)
+    return np.array(pil)
 
 
 def extract_poster(
@@ -87,68 +141,31 @@ def extract_poster(
     If the video is shorter than ``ts_sec`` we walk back to the midpoint
     so we never fall off the end.
     """
+    cap = _open(path)
     try:
-        import av
-    except ImportError as e:
-        raise RuntimeError(
-            "PyAV not installed — video support requires `uv pip install av`."
-        ) from e
-
-    with av.open(str(path)) as container:
-        stream = next(
-            (s for s in container.streams if s.type == "video"), None
-        )
-        if stream is None:
-            raise RuntimeError(f"no video stream in {path.name}")
-
-        # Duration: prefer container-level value (more reliable across
-        # codecs); fall back to the stream's duration in time_base units.
-        duration_sec: float | None = None
-        if container.duration:
-            duration_sec = container.duration / 1_000_000  # AV_TIME_BASE
-        elif stream.duration is not None and stream.time_base is not None:
-            duration_sec = float(stream.duration * stream.time_base)
-
-        # Pick a safe seek target: requested ts, but bounded to the
-        # midpoint so very short clips don't seek past the end.
+        duration_sec = _duration_seconds(cap)
         seek_target = ts_sec
         if duration_sec is not None and duration_sec > 0:
             seek_target = min(ts_sec, duration_sec / 2)
         seek_target = max(seek_target, 0.0)
 
-        # Seek by container PTS (AV_TIME_BASE = microseconds).
-        try:
-            container.seek(int(seek_target * 1_000_000), any_frame=False)
-        except av.AVError:
-            # Some containers refuse the seek; fall back to first frame.
-            log.debug("seek failed for %s — using first frame", path)
+        result = _decode_at(cap, seek_target)
+        if result is None:
+            # Try the first frame as a fallback — some containers
+            # refuse mid-stream seeks (older H.263 .3gp, etc.) but
+            # will hand over frame 0 cleanly.
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, bgr = cap.read()
+            if not ok or bgr is None:
+                raise RuntimeError(f"no decodable frame in {path.name}")
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        else:
+            rgb, _ = result
+    finally:
+        cap.release()
 
-        frame = next(iter(container.decode(stream)), None)
-        if frame is None:
-            raise RuntimeError(f"no decodable frame in {path.name}")
-
-        # Convert the AVFrame to a contiguous RGB uint8 numpy array.
-        rgb = frame.to_ndarray(format="rgb24")
-
-    # Match the still-image pipeline's max_pixels behaviour.
-    h, w = rgb.shape[:2]
-    if h * w > max_pixels:
-        scale = (max_pixels / (h * w)) ** 0.5
-        new_w, new_h = int(w * scale), int(h * scale)
-        pil = Image.fromarray(rgb).resize((new_w, new_h), Image.LANCZOS)
-        rgb = np.array(pil)
-
+    rgb = _downscale(rgb, max_pixels)
     return rgb, duration_sec
-
-
-def _downscale(rgb: np.ndarray, max_pixels: int) -> np.ndarray:
-    h, w = rgb.shape[:2]
-    if h * w <= max_pixels:
-        return rgb
-    scale = (max_pixels / (h * w)) ** 0.5
-    new_w, new_h = int(w * scale), int(h * scale)
-    pil = Image.fromarray(rgb).resize((new_w, new_h), Image.LANCZOS)
-    return np.array(pil)
 
 
 def iter_frames(
@@ -171,33 +188,15 @@ def iter_frames(
     1-hour video with 414 sampled frames never holds more than one
     frame's RGB array in memory.
     """
+    cap = _open(path)
     try:
-        import av
-    except ImportError as e:
-        raise RuntimeError(
-            "PyAV not installed — video support requires `uv pip install av`."
-        ) from e
-
-    with av.open(str(path)) as container:
-        stream = next(
-            (s for s in container.streams if s.type == "video"), None
-        )
-        if stream is None:
-            raise RuntimeError(f"no video stream in {path.name}")
-
-        # Duration: prefer container-level, fall back to stream-level.
-        duration_sec: float | None = None
-        if container.duration:
-            duration_sec = container.duration / 1_000_000
-        elif stream.duration is not None and stream.time_base is not None:
-            duration_sec = float(stream.duration * stream.time_base)
-
+        duration_sec = _duration_seconds(cap)
         targets = (
             list(timestamps) if timestamps is not None
             else frame_schedule(duration_sec)
         )
 
-        # Track the actual PTS values we've already yielded. With a
+        # Track the actual timestamps we've already yielded. With a
         # codec whose keyframe interval > our schedule step (older
         # H.264 / MJPEG / some 2014-era iPhone .mov clips), consecutive
         # seeks land on the same keyframe and we'd otherwise yield the
@@ -212,29 +211,18 @@ def iter_frames(
                 seek_target = min(seek_target, duration_sec - 0.05)
             seek_target = max(seek_target, 0.0)
 
-            try:
-                container.seek(int(seek_target * 1_000_000), any_frame=False)
-            except av.AVError:
-                log.debug("seek failed for %s @ %.2fs", path, seek_target)
+            result = _decode_at(cap, seek_target)
+            if result is None:
                 continue
-
-            frame = next(iter(container.decode(stream)), None)
-            if frame is None:
-                continue
-            actual = float(
-                frame.pts * stream.time_base
-                if frame.pts is not None and stream.time_base is not None
-                else seek_target
-            )
+            rgb, actual = result
             # Round to ms so floating-point noise doesn't defeat the
-            # set-membership check (PyAV's PTS computations are
-            # deterministic but the float math leading to `actual`
-            # isn't bit-exact across runs).
+            # set-membership check.
             key = round(actual, 3)
             if key in yielded_pts:
                 continue
             yielded_pts.add(key)
 
-            rgb = frame.to_ndarray(format="rgb24")
             rgb = _downscale(rgb, max_pixels)
             yield actual, rgb, duration_sec
+    finally:
+        cap.release()

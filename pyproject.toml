@@ -42,9 +42,11 @@ dependencies = [
     "python-multipart>=0.0.9",
     # Crash diagnostics — RSS sampling for the index checkpoint log
     "psutil>=5.9",
-    # Video poster-frame extraction (V1 video support)
-    "av>=12.0",
 ]
+# Video decoding uses cv2.VideoCapture (FFmpeg under the hood). cv2
+# already ships via ultralytics, so we don't need a second FFmpeg
+# bundle from pyav — and having both triggers macOS ObjC
+# class-duplication warnings for libavdevice.
 
 [project.optional-dependencies]
 raw = ["rawpy>=0.21"]

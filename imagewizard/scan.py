@@ -44,10 +44,11 @@ RAW_EXTS = frozenset({
 
 VIDEO_EXTS = frozenset({".mov", ".mp4", ".avi", ".mkv", ".m4v"})
 
-# Videos are now supported via PyAV + FFmpeg. The pipeline extracts a
-# single poster frame at ~1s and runs the same ML stages on it, so a
-# video's row in `files` looks just like a photo's except for kind=video
-# and a populated duration_sec.
+# Videos are decoded via cv2.VideoCapture (FFmpeg under the hood). The
+# pipeline extracts a poster frame at ~1s, runs the same ML stages on
+# it, then samples additional frames per the V2 schedule — so a video's
+# row in `files` looks just like a photo's except for kind=video and a
+# populated duration_sec.
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 
