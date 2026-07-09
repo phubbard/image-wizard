@@ -364,6 +364,13 @@ caffeinate -i image-wizard index --workers 4 --max-rss-gb 16
 
 # Investigate a silent crash
 image-wizard last-crash -n 80 --kernel
+
+# Fire-and-forget wrapper around `index` for flaky ML libraries: if the
+# indexer dies, read the checkpoint log to find the file that was in
+# flight, auto-tombstone it, and restart. Stops on clean completion,
+# 30 consecutive crashes, 100 tombstones, or a same-file-twice loop.
+image-wizard babysit-index
+image-wizard babysit-index -- --workers 4 --no-clip   # pass through
 ```
 
 ## Roadmap

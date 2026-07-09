@@ -123,6 +123,50 @@ def _is_inside_photo_library(dirpath: str) -> bool:
     return ".photoslibrary" in lower or "iphoto library" in lower
 
 
+def _find_last_in_flight(log_path: "Path") -> tuple[int, str] | None:
+    """Scan the tail of the checkpoint log and return the (file_id, path)
+    of the file that was in flight when the process died.
+
+    The pipeline is single-threaded on the consumer side, so at any
+    moment at most one file is between its ``start`` and ``done``
+    lines. The in-flight file is the one with the last ``start`` that
+    has no corresponding ``done`` after it. Returns None when the log
+    is missing or the tail shows every started file completed cleanly
+    (a rare "process exited after done, before next start" case that
+    we won't confidently pin on any single file).
+    """
+    if not log_path.exists():
+        return None
+    # 512 KB tail is plenty — the pipeline logs a few hundred lines per
+    # minute at most, and we only care about the recent state.
+    with log_path.open("rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        block = min(size, 512 * 1024)
+        f.seek(size - block)
+        chunk = f.read().decode("utf-8", errors="replace")
+
+    last_start: tuple[int, str] | None = None
+    for line in chunk.splitlines():
+        # Format: "<unix_ts> <event> <args...>"
+        parts = line.split(maxsplit=3)
+        if len(parts) < 3:
+            continue
+        event = parts[1]
+        try:
+            fid = int(parts[2])
+        except ValueError:
+            continue
+        if event == "start":
+            path = parts[3] if len(parts) > 3 else ""
+            last_start = (fid, path)
+        elif event == "done" and last_start and last_start[0] == fid:
+            # The last-started file completed. Reset so we only pin
+            # blame on a start that has *no* subsequent done.
+            last_start = None
+    return last_start
+
+
 def delete_file_row(conn, file_id: int) -> None:
     """Delete a files row plus the sqlite-vec virtual-table rows that
     won't be reached by CASCADE.
@@ -1178,6 +1222,152 @@ def register(parent: typer.Typer) -> None:
                     console.print(f"[dim]no videos matched --state={state}[/dim]")
         finally:
             conn.close()
+
+    @parent.command(
+        name="babysit-index",
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": True,
+        },
+    )
+    def cmd_babysit(
+        ctx: typer.Context,
+        max_retries: int = typer.Option(
+            30, "--max-retries",
+            help="Stop after this many consecutive crashes (default: 30).",
+        ),
+        max_tombstones: int = typer.Option(
+            100, "--max-tombstones",
+            help="Stop after auto-tombstoning this many files (default: 100).",
+        ),
+        auto_tombstone: bool = typer.Option(
+            True, "--auto-tombstone/--no-auto-tombstone",
+            help="Mark the last in-flight file as decode_failed after a "
+                 "crash so the next run skips it. On by default — that's "
+                 "the whole point.",
+        ),
+    ) -> None:
+        """Run ``index`` in a loop, auto-tombstoning crashers.
+
+        Fire-and-forget wrapper for a flaky-ML-library environment. Runs
+        the same ``index`` subprocess you'd run by hand; if it exits
+        non-zero (or gets killed), reads the checkpoint log to find the
+        file that was in flight at crash time, marks it ``decode_failed
+        =1`` (reversible with ``clear-failures``), and restarts.
+
+        Stops when:
+          * ``index`` exits 0 (queue empty — normal completion),
+          * ``--max-retries`` consecutive crashes,
+          * ``--max-tombstones`` files marked (safety cap in case a
+            whole *class* of files is broken and we shouldn't keep
+            tombstoning them),
+          * the same file id would be tombstoned twice in a row
+            (means tombstoning didn't help — something else is wrong).
+
+        Extra positional args are passed through to ``index``:
+
+            uv run image-wizard babysit-index -- --workers 4 --no-clip
+        """
+        import subprocess
+        import sys
+
+        cfg = config.load()
+        db.init(cfg.db_path)
+        console = Console()
+        log_path = cfg.cache_dir / "logs" / "index.log"
+
+        # Everything after `babysit-index` and its own flags gets passed
+        # through to `index` verbatim. Typer collects them in
+        # ctx.args when the two context_settings above are set.
+        passthrough_args = list(ctx.args)
+
+        crashes = 0
+        tombstones = 0
+        last_tombstoned_id: int | None = None
+
+        while True:
+            cmd = [
+                sys.executable, "-m", "imagewizard.cli", "index",
+                *passthrough_args,
+            ]
+            console.rule(
+                f"[bold]run #{crashes + tombstones + 1}[/bold]  "
+                f"(crashes={crashes}, tombstoned={tombstones})"
+            )
+            console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
+            result = subprocess.run(cmd)
+
+            if result.returncode == 0:
+                console.rule("[green]index completed cleanly[/green]")
+                console.print(
+                    f"total crashes handled: {crashes}, "
+                    f"files auto-tombstoned: {tombstones}"
+                )
+                return
+
+            console.print(
+                f"[red]index exited with code {result.returncode}[/red]"
+            )
+            crashes += 1
+
+            if not auto_tombstone:
+                console.print(
+                    "[yellow]--no-auto-tombstone: restarting without "
+                    "marking the crasher.[/yellow]"
+                )
+                if crashes >= max_retries:
+                    console.print(
+                        f"[red]max retries ({max_retries}) reached[/red]"
+                    )
+                    return
+                continue
+
+            in_flight = _find_last_in_flight(log_path)
+            if in_flight is None:
+                console.print(
+                    "[yellow]could not identify in-flight file from log — "
+                    "restarting without tombstoning.[/yellow]"
+                )
+                if crashes >= max_retries:
+                    console.print(
+                        f"[red]max retries ({max_retries}) reached[/red]"
+                    )
+                    return
+                continue
+
+            file_id, path_hint = in_flight
+            if file_id == last_tombstoned_id:
+                console.print(
+                    f"[red]file #{file_id} would be tombstoned twice in a "
+                    f"row — aborting.[/red] Something else is wrong."
+                )
+                return
+
+            conn = db.connect(cfg.db_path)
+            try:
+                conn.execute(
+                    "UPDATE files SET decode_failed=1, decode_error=? "
+                    "WHERE id=?",
+                    (f"babysit auto-tombstone after crash #{crashes}"[:500],
+                     file_id),
+                )
+            finally:
+                conn.close()
+
+            tombstones += 1
+            last_tombstoned_id = file_id
+            console.print(
+                f"[yellow]tombstoned file #{file_id}[/yellow] {path_hint}"
+            )
+
+            if tombstones >= max_tombstones:
+                console.print(
+                    f"[red]max tombstones ({max_tombstones}) reached — "
+                    "something is systemically wrong; investigate before "
+                    "raising the cap.[/red]"
+                )
+                return
+            crashes = 0  # progress made, reset the consecutive counter
 
     @parent.command(name="skip")
     def cmd_skip(
