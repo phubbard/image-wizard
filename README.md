@@ -124,6 +124,13 @@ image-wizard skip 'P1050349_face0.jpg' --reason "InsightFace native crash"
 image-wizard cleanup-thumbnails --dry-run
 image-wizard cleanup-thumbnails
 
+# Sweep for files whose source path is no longer accessible and mark
+# them missing so the web UI stops linking to a 404. Reverse via
+# `rescan` — a subsequent rescan that finds the path again unsets the
+# flag. Slower on network mounts (one stat per row).
+image-wizard check-missing --dry-run
+image-wizard check-missing
+
 # Sweep orphan rows from the sqlite-vec virtual tables. Older
 # delete-paths (drop-small, drop-videos, find-duplicates --delete,
 # pre-fix cleanup-thumbnails) didn't reach vec_clip / vec_faces /

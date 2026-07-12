@@ -1587,20 +1587,43 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         conn = get_conn()
         try:
             row = conn.execute(
-                "SELECT path, content_hash, kind FROM files WHERE id=?", (file_id,)
+                "SELECT path, content_hash, kind, missing FROM files "
+                "WHERE id=?",
+                (file_id,),
             ).fetchone()
             if not row:
-                return HTMLResponse("not found", 404)
+                log.warning("/full/%s: no row in files", file_id)
+                return HTMLResponse(
+                    f"no file with id {file_id} in the database", 404
+                )
             p = Path(row["path"])
             ext = p.suffix.lower()
+
+            def _missing(reason: str):
+                """Uniform 404 with the path so the browser's Network tab
+                surfaces *why* the request failed, and the server log
+                has enough to bisect (missing-on-disk vs unmounted-vol
+                vs never-existed)."""
+                log.warning(
+                    "/full/%s: %s (path=%s, missing_flag=%s)",
+                    file_id, reason, row["path"], row["missing"],
+                )
+                return HTMLResponse(
+                    f"{reason}\n"
+                    f"path: {row['path']}\n"
+                    f"missing flag in DB: {bool(row['missing'])}",
+                    404,
+                )
 
             # Videos: serve the actual file with a video/* MIME so the
             # <video> tag can stream it. FastAPI's FileResponse handles
             # HTTP Range requests automatically, so seeking works.
             if row["kind"] == "video" or ext in _WEB_VIDEO_EXTS:
                 if not p.exists():
-                    return HTMLResponse("file missing", 404)
-                return FileResponse(p, media_type=_VIDEO_MIME.get(ext, "application/octet-stream"))
+                    return _missing("video source file not accessible")
+                return FileResponse(
+                    p, media_type=_VIDEO_MIME.get(ext, "application/octet-stream"),
+                )
 
             # Images: hand back the source file if the browser can render
             # it directly; else serve the cached JPEG thumbnail (HEIC,
@@ -1609,8 +1632,11 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 tp = thumb_path(cfg.cache_dir, row["content_hash"])
                 if tp.exists():
                     return FileResponse(tp, media_type="image/jpeg")
+                # Non-web ext AND no thumb — fall through to source file,
+                # which the browser probably can't render but at least
+                # confirms it exists.
             if not p.exists():
-                return HTMLResponse("file missing", 404)
+                return _missing("source file not accessible")
             return FileResponse(p)
         finally:
             conn.close()

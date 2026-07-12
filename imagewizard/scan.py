@@ -1492,6 +1492,60 @@ def register(parent: typer.Typer) -> None:
                 return
             crashes = 0  # progress made, reset the consecutive counter
 
+    @parent.command(name="check-missing")
+    def cmd_check_missing(
+        dry_run: bool = typer.Option(
+            False, "--dry-run",
+            help="Report what would be marked missing without changing the DB.",
+        ),
+        limit: int = typer.Option(
+            0, "--limit",
+            help="Stop after checking this many files (0 = all).",
+        ),
+    ) -> None:
+        """Mark files whose source path is no longer accessible as missing.
+
+        Sweeps every ``missing=0`` row in ``files`` and stats each
+        path. Anything that doesn't exist on disk (or on an unmounted
+        network volume) gets ``missing=1`` so the web UI stops linking
+        to it. Reverse via ``rescan`` — a subsequent rescan that finds
+        the path again unsets the flag automatically.
+
+        Cheap on local disk; slower on network mounts (one ``stat``
+        per file). Runs single-threaded for predictable I/O.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            rows = conn.execute(
+                "SELECT id, path FROM files WHERE missing=0"
+            ).fetchall()
+            if limit:
+                rows = rows[:limit]
+            console.print(f"[dim]checking {len(rows)} file(s)…[/dim]")
+            gone: list[tuple[int, str]] = []
+            for r in rows:
+                if not Path(r["path"]).exists():
+                    gone.append((r["id"], r["path"]))
+            console.print(f"[bold]{len(gone)} missing on disk[/bold]")
+            for fid, path in gone[:20]:
+                console.print(f"  #{fid:7d}  {path}")
+            if len(gone) > 20:
+                console.print(f"  ... and {len(gone) - 20} more")
+            if dry_run:
+                console.print("[yellow]dry-run — nothing changed[/yellow]")
+                return
+            for fid, _ in gone:
+                conn.execute(
+                    "UPDATE files SET missing=1 WHERE id=?", (fid,)
+                )
+            console.print(
+                f"[green]marked {len(gone)} row(s) as missing[/green]"
+            )
+        finally:
+            conn.close()
+
     @parent.command(name="skip")
     def cmd_skip(
         target: str = typer.Argument(
