@@ -1223,6 +1223,129 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="refresh")
+    def cmd_refresh(
+        workers: int = typer.Option(
+            4, "--workers", "-w",
+            help="Passed through to the underlying `index` run.",
+        ),
+        walk_workers: int | None = typer.Option(
+            None, "--walk-workers",
+            help="Passed through to the underlying `rescan` run.",
+        ),
+        lock: bool = typer.Option(
+            True, "--lock/--no-lock",
+            help="Refuse to start if another refresh is already running "
+                 "(via an fcntl lock in the cache dir). On by default.",
+        ),
+    ) -> None:
+        """Cron-friendly one-shot: rescan → babysit-index → cluster-faces.
+
+        Fire this from cron / launchd on a schedule and the DB will keep
+        current. All three phases append timestamped output to
+        ``<cache>/logs/refresh.log`` for post-hoc inspection. Stdout is
+        quiet on success and prints one summary line on failure, so
+        cron's mail-on-nonzero-output alerts you only when something
+        needs attention.
+
+        Exit codes:
+          0   every phase succeeded
+          1   one or more phases returned non-zero
+          2   another refresh was already running (lock held)
+
+        Example crontab (every hour on the hour):
+
+            0 * * * * cd /path/to/image-wizard && \\
+                /Users/you/.local/bin/uv run image-wizard refresh
+
+        Or as a launchd LaunchAgent — see the README section
+        "Scheduled refresh".
+        """
+        import datetime as _dt
+        import fcntl
+        import subprocess
+        import sys
+
+        cfg = config.load()
+        db.init(cfg.db_path)
+        console = Console()
+        log_dir = cfg.cache_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "refresh.log"
+        lock_path = cfg.cache_dir / "refresh.lock"
+
+        lock_fh = None
+        if lock:
+            try:
+                lock_fh = open(lock_path, "w")
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_fh.write(str(os.getpid()))
+                lock_fh.flush()
+            except (OSError, BlockingIOError):
+                # Another refresh is already running — that's fine, we
+                # just exit with a distinct code so cron doesn't mail on
+                # "expected concurrent skip".
+                print(
+                    f"another refresh is already running (lock at "
+                    f"{lock_path})", file=sys.stderr,
+                )
+                raise typer.Exit(2)
+
+        def _stamp() -> str:
+            return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # All subprocesses funnel their stdout+stderr into the same log
+        # file. We use python -m imagewizard.cli rather than the
+        # `image-wizard` script so we avoid depending on PATH — cron's
+        # environment is spartan.
+        def phase(name: str, argv: list[str]) -> int:
+            with open(log_path, "a") as log:
+                log.write(f"\n[{_stamp()}] === {name} ===\n")
+                log.flush()
+                proc = subprocess.run(
+                    [sys.executable, "-m", "imagewizard.cli", *argv],
+                    stdout=log, stderr=subprocess.STDOUT,
+                )
+                log.write(
+                    f"[{_stamp()}] === {name} exited "
+                    f"{proc.returncode} ===\n"
+                )
+            return proc.returncode
+
+        phases: list[tuple[str, list[str], int]] = []
+        rescan_args = ["rescan"]
+        if walk_workers is not None:
+            rescan_args += ["--walk-workers", str(walk_workers)]
+        phases.append(("rescan", rescan_args, phase("rescan", rescan_args)))
+
+        # Passthrough --workers to `index` via babysit-index's `--` fence.
+        babysit_args = ["babysit-index", "--", "--workers", str(workers)]
+        phases.append(("babysit-index", babysit_args,
+                       phase("babysit-index", babysit_args)))
+
+        phases.append(("cluster-faces", ["cluster-faces"],
+                       phase("cluster-faces", ["cluster-faces"])))
+
+        # Summary — silent on success, one line to stdout on failure so
+        # cron mails it.
+        failures = [name for name, _, rc in phases if rc != 0]
+        with open(log_path, "a") as log:
+            log.write(
+                f"[{_stamp()}] refresh done "
+                f"({len(phases) - len(failures)}/{len(phases)} phases OK)\n"
+            )
+        if failures:
+            print(
+                f"image-wizard refresh: {len(failures)} phase(s) failed: "
+                f"{', '.join(failures)}. See {log_path}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(1)
+
+        if lock_fh is not None:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            lock_fh.close()
+
     @parent.command(
         name="babysit-index",
         context_settings={

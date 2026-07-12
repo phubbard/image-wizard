@@ -371,6 +371,71 @@ image-wizard last-crash -n 80 --kernel
 # 30 consecutive crashes, 100 tombstones, or a same-file-twice loop.
 image-wizard babysit-index
 image-wizard babysit-index -- --workers 4 --no-clip   # pass through
+
+# Cron-friendly one-shot: rescan → babysit-index → cluster-faces, with
+# an fcntl lock so a slow prior run doesn't overlap the next scheduled
+# tick. Silent on success; prints one summary line to stderr on failure
+# (so cron mails you only when something needs attention). Full
+# subprocess output goes to <cache>/logs/refresh.log for post-hoc
+# inspection.
+#
+# Exit codes: 0 = all phases OK, 1 = one or more failed, 2 = another
+# refresh already running (concurrent skip — safe to ignore).
+image-wizard refresh
+image-wizard refresh --workers 4 --walk-workers 16    # phase tuning
+```
+
+### Scheduled refresh
+
+Run `image-wizard refresh` on a schedule and the DB stays current with
+zero manual intervention. Two options on macOS:
+
+**cron** — simplest. `crontab -e`:
+
+```
+0 * * * * cd /path/to/image-wizard && /Users/you/.local/bin/uv run image-wizard refresh
+```
+
+Modern macOS cron needs Full Disk Access (System Settings → Privacy &
+Security → Full Disk Access → add `/usr/sbin/cron`) to touch anything
+under `~/Library/`.
+
+**launchd LaunchAgent** — the native path, no permissions dance.
+Create `~/Library/LaunchAgents/net.phfactor.image-wizard.refresh.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.phfactor.image-wizard.refresh</string>
+  <key>WorkingDirectory</key><string>/path/to/image-wizard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.local/bin/uv</string>
+    <string>run</string>
+    <string>image-wizard</string>
+    <string>refresh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/image-wizard.refresh.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/image-wizard.refresh.err</string>
+</dict>
+</plist>
+```
+
+Load it: `launchctl load ~/Library/LaunchAgents/net.phfactor.image-wizard.refresh.plist`.
+
+Post-run introspection:
+
+```bash
+tail -100 ~/Library/Caches/image-wizard/logs/refresh.log
 ```
 
 ## Roadmap
