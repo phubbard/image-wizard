@@ -313,6 +313,13 @@ imagewizard/
 
 Override with `IMAGEWIZARD_DATA_DIR` and `IMAGEWIZARD_CACHE_DIR` env vars.
 
+The SQLite schema self-migrates: every command opens the DB through a
+connection helper that applies any pending additive column migrations
+(idempotent, race-safe). Pulling a newer build and running *any*
+command upgrades the schema in place — there's no separate migration
+step, and older maintenance CLIs won't error on columns added by a
+newer version.
+
 ## Debugging silent crashes
 
 `image-wizard index` is long-running and touches several native

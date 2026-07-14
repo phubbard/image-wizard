@@ -168,7 +168,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_clip_frames USING vec0(embedding float[51
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Open a sqlite connection with sqlite-vec loaded and pragmas set."""
+    """Open a sqlite connection with sqlite-vec loaded and pragmas set.
+
+    Runs the additive column migrations on every connect so that any
+    entry point — including maintenance CLIs that only ``connect`` and
+    never ``init`` — sees an up-to-date schema. The migrations are
+    cheap idempotent PRAGMA checks (a handful of metadata reads) and
+    early-out entirely on a fresh DB whose tables don't exist yet.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, isolation_level=None)  # autocommit; use tx() for txns
     conn.row_factory = sqlite3.Row
@@ -179,6 +186,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA temp_store=MEMORY")
+    _migrate(conn)
     return conn
 
 
@@ -197,86 +205,97 @@ def init(db_path: Path) -> None:
         conn.close()
 
 
+def _add_column(
+    conn: sqlite3.Connection, table: str, name: str, decl: str
+) -> bool:
+    """Add a column if the table lacks it. Returns True if it was added.
+
+    Race-safe: if another connection adds the same column between our
+    check and our ALTER (possible when the web server opens many
+    connections at once on a DB that needs migrating), SQLite raises
+    "duplicate column name" — we swallow it and report not-added.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if name in cols:
+        return False
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {decl}")
+        return True
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e).lower():
+            return False
+        raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Idempotent additive migrations (only ADD COLUMN, never drop)."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(face_clusters)")}
-    if "person_id" not in cols:
-        conn.execute(
-            "ALTER TABLE face_clusters ADD COLUMN person_id INTEGER"
+    """Idempotent additive migrations (only ADD COLUMN, never drop).
+
+    Safe to call on every connection: if the base tables don't exist
+    yet (a brand-new DB before ``init`` runs SCHEMA_SQL) we bail out
+    early, and ``init`` calls ``_migrate`` again after creating them.
+    """
+    tables = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
         )
+    }
+    if "files" not in tables:
+        # Fresh DB — nothing to migrate yet. init() creates the schema
+        # then calls _migrate again.
+        return
+
+    if "face_clusters" in tables and _add_column(
+        conn, "face_clusters", "person_id", "person_id INTEGER"
+    ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fc_person ON face_clusters(person_id)"
         )
 
-    # decode_failed: tombstone for files that errored during decode (corrupt
-    # JPEG, unsupported RAW variant, ...). Marking them avoids retrying the
-    # decode every `index` run, which is wasteful especially over network
-    # mounts. Cleared by `image-wizard clear-failures`.
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-    if "decode_failed" not in cols:
-        conn.execute(
-            "ALTER TABLE files ADD COLUMN decode_failed INTEGER NOT NULL DEFAULT 0"
-        )
+    # decode_failed / decode_error: tombstone for files that errored during
+    # decode. Marking them avoids retrying the decode every `index` run.
+    if _add_column(
+        conn, "files", "decode_failed",
+        "decode_failed INTEGER NOT NULL DEFAULT 0",
+    ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_decode_failed "
             "ON files(decode_failed)"
         )
-    if "decode_error" not in cols:
-        conn.execute("ALTER TABLE files ADD COLUMN decode_error TEXT")
+    _add_column(conn, "files", "decode_error", "decode_error TEXT")
 
-    # too_small: tombstone for files that fail the dimension filter (icon
-    # cache, Synology auto-generated thumbnails, screenshots of dialog
-    # boxes...). Recording them once means the next scan recognises the
-    # path immediately and skips the expensive PIL header read.
-    if "too_small" not in cols:
-        conn.execute(
-            "ALTER TABLE files ADD COLUMN too_small INTEGER NOT NULL DEFAULT 0"
-        )
+    # too_small: tombstone for files that fail the dimension filter.
+    _add_column(
+        conn, "files", "too_small",
+        "too_small INTEGER NOT NULL DEFAULT 0",
+    )
 
-    # kind / duration_sec: video support (V1). kind='image' is the legacy
-    # default for any pre-existing row; new scans set it explicitly.
-    # duration_sec is NULL for images, populated for videos at index time
-    # by the poster-frame extractor.
-    if "kind" not in cols:
-        conn.execute(
-            "ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'image'"
-        )
+    # kind / duration_sec: video support (V1).
+    if _add_column(
+        conn, "files", "kind", "kind TEXT NOT NULL DEFAULT 'image'"
+    ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind)"
         )
-    if "duration_sec" not in cols:
-        conn.execute("ALTER TABLE files ADD COLUMN duration_sec REAL")
+    _add_column(conn, "files", "duration_sec", "duration_sec REAL")
 
-    # frame_id on detections / faces (V2 video support). NULL means
-    # "applies to the whole file" (legacy photos and V1 video poster
-    # frames). Foreign-key cascade is set in the table definition for
-    # NEW deployments; ALTER TABLE in SQLite can't add FK so existing
-    # databases get the column without a constraint — application code
-    # cleans up frame deletions explicitly.
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(detections)")}
-    if "frame_id" not in cols:
-        conn.execute("ALTER TABLE detections ADD COLUMN frame_id INTEGER")
+    # frame_id on detections / faces (V2 video support).
+    if "detections" in tables and _add_column(
+        conn, "detections", "frame_id", "frame_id INTEGER"
+    ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_detections_frame ON detections(frame_id)"
         )
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(faces)")}
-    if "frame_id" not in cols:
-        conn.execute("ALTER TABLE faces ADD COLUMN frame_id INTEGER")
+    if "faces" in tables and _add_column(
+        conn, "faces", "frame_id", "frame_id INTEGER"
+    ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_faces_frame ON faces(frame_id)"
         )
 
-    # live_photo_of: when a video file's basename matches a still-image
-    # sibling in the same directory (iPhone Live Photos, HEIC+MOV
-    # pairs), the MOV is the motion companion of the still — 1–2s of
-    # motion around the shot. Store the paired photo's id here so the
-    # pipeline and web UI can hide the MOV entirely instead of showing
-    # a phantom duplicate video.
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-    if "live_photo_of" not in cols:
-        conn.execute(
-            "ALTER TABLE files ADD COLUMN live_photo_of INTEGER"
-        )
+    # live_photo_of: iPhone Live Photo .MOV companions point at the still.
+    if _add_column(
+        conn, "files", "live_photo_of", "live_photo_of INTEGER"
+    ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_live_photo_of "
             "ON files(live_photo_of)"
