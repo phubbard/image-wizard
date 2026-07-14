@@ -131,6 +131,14 @@ image-wizard cleanup-thumbnails
 image-wizard check-missing --dry-run
 image-wizard check-missing
 
+# iPhone Live Photos land as HEIC+MOV pairs with matching basenames.
+# The .MOV is 1-2s of motion around the still — showing it as a
+# separate video in the timeline looks like a duplicate. `rescan`
+# runs this automatically as its final step; use the CLI to run it
+# by hand or to re-check after fixing a bad match.
+image-wizard find-live-photos
+image-wizard find-live-photos --rescan-all      # re-evaluate everything
+
 # Sweep orphan rows from the sqlite-vec virtual tables. Older
 # delete-paths (drop-small, drop-videos, find-duplicates --delete,
 # pre-fix cleanup-thumbnails) didn't reach vec_clip / vec_faces /

@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -264,6 +264,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE faces ADD COLUMN frame_id INTEGER")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_faces_frame ON faces(frame_id)"
+        )
+
+    # live_photo_of: when a video file's basename matches a still-image
+    # sibling in the same directory (iPhone Live Photos, HEIC+MOV
+    # pairs), the MOV is the motion companion of the still — 1–2s of
+    # motion around the shot. Store the paired photo's id here so the
+    # pipeline and web UI can hide the MOV entirely instead of showing
+    # a phantom duplicate video.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    if "live_photo_of" not in cols:
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN live_photo_of INTEGER"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_live_photo_of "
+            "ON files(live_photo_of)"
         )
 
 

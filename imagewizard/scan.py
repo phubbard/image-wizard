@@ -167,6 +167,72 @@ def _find_last_in_flight(log_path: "Path") -> tuple[int, str] | None:
     return last_start
 
 
+def _live_photo_still_exts() -> list[str]:
+    """Extensions we treat as the still half of a Live Photo pair."""
+    return [".heic", ".heif", ".jpg", ".jpeg", ".png"]
+
+
+def detect_live_photos(conn, only_new: bool = True) -> int:
+    """Flag video files whose basename matches a still-image sibling.
+
+    iPhone Live Photos store as ``IMG_1234.HEIC`` (the still) plus
+    ``IMG_1234.MOV`` (1–2s of motion around the shot). Both land in
+    ``files`` and the .MOV shows up in the UI as a phantom duplicate
+    video. Detect the pairing by basename equality within the same
+    directory and set ``files.live_photo_of`` on the video to point
+    at the still's id.
+
+    Idempotent: with ``only_new`` (default) we skip videos that
+    already have ``live_photo_of`` set. Pass ``only_new=False`` to
+    re-scan everything (e.g. after fixing a bad match).
+
+    Returns the number of files newly flagged.
+    """
+    where = "missing = 0"
+    if only_new:
+        where += " AND live_photo_of IS NULL"
+    videos = conn.execute(
+        f"""SELECT id, path FROM files
+            WHERE {where}
+              AND (
+                LOWER(SUBSTR(path, -4)) IN ('.mov', '.mp4')
+                OR LOWER(SUBSTR(path, -4)) = '.m4v'
+              )"""
+    ).fetchall()
+
+    still_exts = _live_photo_still_exts()
+    flagged = 0
+    for r in videos:
+        p = Path(r["path"])
+        prefix = str(p.parent) + os.sep + p.stem + "."
+        # Look up any still-image file in the same directory with the
+        # matching basename. Multiple candidate rows (HEIC + JPG both)
+        # are fine — pick the lowest id for determinism.
+        candidates: list[int] = []
+        for ext in still_exts:
+            row = conn.execute(
+                "SELECT id FROM files WHERE missing=0 AND path=? LIMIT 1",
+                (prefix + ext[1:],),  # ext already has leading '.'
+            ).fetchone() or conn.execute(
+                # Case-insensitive fallback for weird filesystems
+                """SELECT id FROM files
+                   WHERE missing=0
+                     AND LOWER(path) = LOWER(?)
+                   LIMIT 1""",
+                (prefix + ext[1:],),
+            ).fetchone()
+            if row:
+                candidates.append(row["id"])
+        if candidates:
+            still_id = min(candidates)
+            conn.execute(
+                "UPDATE files SET live_photo_of=? WHERE id=?",
+                (still_id, r["id"]),
+            )
+            flagged += 1
+    return flagged
+
+
 def delete_file_row(conn, file_id: int) -> None:
     """Delete a files row plus the sqlite-vec virtual-table rows that
     won't be reached by CASCADE.
@@ -267,6 +333,7 @@ def scan(
         "new": 0, "changed": 0, "unchanged": 0, "missing": 0,
         "errors": 0, "skipped_small": 0,
         "dedup_skipped": 0, "moved": 0,
+        "live_photo_pairs": 0,
     }
 
     # Record the scan roots so the About page can show what's been indexed.
@@ -415,6 +482,12 @@ def scan(
         for p in gone:
             conn.execute("UPDATE files SET missing=1 WHERE path=?", (p,))
         stats["missing"] = len(gone)
+
+    # Detect iPhone Live Photo pairs (HEIC + MOV with matching basenames).
+    # Runs after the walk so both halves of any newly-added pair are in
+    # the DB before we try to match them. Cheap: one indexed SELECT per
+    # video row that doesn't already have live_photo_of set.
+    stats["live_photo_pairs"] = detect_live_photos(conn, only_new=True)
 
     return stats
 
@@ -1491,6 +1564,33 @@ def register(parent: typer.Typer) -> None:
                 )
                 return
             crashes = 0  # progress made, reset the consecutive counter
+
+    @parent.command(name="find-live-photos")
+    def cmd_find_live_photos(
+        rescan_all: bool = typer.Option(
+            False, "--rescan-all",
+            help="Re-check even files that already have live_photo_of "
+                 "set. Use after fixing a bad match by hand.",
+        ),
+    ) -> None:
+        """Detect iPhone Live Photo pairs and hide the .MOV companion.
+
+        Live Photos land on disk as a HEIC + MOV pair with the same
+        basename (``IMG_1234.HEIC`` + ``IMG_1234.MOV``). The .MOV is
+        1–2s of motion around the shot — showing it separately in the
+        timeline looks like a duplicate. This helper marks each such
+        .MOV as ``live_photo_of=<the HEIC's id>``; the pipeline and
+        the web UI then hide it. Reverse by clearing the column with
+        SQL if you want the MOV back in the timeline.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            n = detect_live_photos(conn, only_new=not rescan_all)
+            console.print(f"[green]flagged {n} Live Photo companion(s)[/green]")
+        finally:
+            conn.close()
 
     @parent.command(name="check-missing")
     def cmd_check_missing(

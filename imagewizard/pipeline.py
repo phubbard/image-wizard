@@ -394,7 +394,8 @@ def index_files(
     # be worth indexing (Synology / iPhoto auto-thumbnails).
     query = (
         "SELECT id, path, content_hash, meta_done, yolo_done, faces_done, clip_done "
-        f"FROM files WHERE missing=0 AND decode_failed=0 AND too_small=0 AND ({where})"
+        f"FROM files WHERE missing=0 AND decode_failed=0 AND too_small=0 "
+        f"AND live_photo_of IS NULL AND ({where})"
     )
     if limit:
         query += f" LIMIT {limit}"
