@@ -1437,9 +1437,170 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                       {root_frag}""",
                 root_params,
             ).fetchall()
+            n_untagged = _count_untagged(conn)
             return TEMPLATES.TemplateResponse(request, "map.html", {
                 "points": points,
+                "n_untagged": n_untagged,
             })
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Geotagging workflow
+    # ------------------------------------------------------------------
+    # Old scans often lack GPS EXIF. /geotag walks the untagged photos
+    # one at a time; the user clicks a spot on a Leaflet map and we
+    # reverse-geocode to city/region/country (offline, ~2 MB cities DB)
+    # and store lat/lon on photo_meta. Optionally applies the same
+    # location to every untagged photo taken on the same calendar day
+    # (travel photos cluster by day).
+
+    def _count_untagged(conn) -> int:
+        row = conn.execute(
+            """SELECT COUNT(*) FROM files f
+               LEFT JOIN photo_meta pm ON pm.file_id = f.id
+               WHERE f.missing = 0 AND f.live_photo_of IS NULL
+                 AND (pm.lat IS NULL)"""
+        ).fetchone()
+        return row[0] if row else 0
+
+    @app.get("/geotag", response_class=HTMLResponse)
+    async def geotag_page(request: Request, photo: int | None = Query(None)):
+        """Location-tagging workflow. If ?photo=ID is given, that photo
+        is the starting item (used by the 'Add location' link on the
+        photo detail page); otherwise start at the first untagged one."""
+        conn = get_conn()
+        try:
+            n_untagged = _count_untagged(conn)
+            return TEMPLATES.TemplateResponse(request, "geotag.html", {
+                "n_untagged": n_untagged,
+                "start_photo": photo,
+            })
+        finally:
+            conn.close()
+
+    @app.get("/geotag/queue.json")
+    async def geotag_queue(
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=200),
+        photo: int | None = Query(None),
+    ):
+        """Batch of untagged photos for the client to work through.
+
+        If ``photo`` is given it's returned first (so the detail-page
+        'Add location' link lands on that specific photo), followed by
+        the normal untagged queue.
+        """
+        conn = get_conn()
+        try:
+            items: list[dict] = []
+            seen: set[int] = set()
+            if photo is not None and offset == 0:
+                r = conn.execute(
+                    """SELECT f.id, f.content_hash, pm.taken_at, f.path
+                       FROM files f
+                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                       WHERE f.id = ?""",
+                    (photo,),
+                ).fetchone()
+                if r:
+                    items.append({
+                        "id": r["id"], "hash": r["content_hash"],
+                        "taken_at": r["taken_at"], "path": r["path"],
+                    })
+                    seen.add(r["id"])
+            rows = conn.execute(
+                """SELECT f.id, f.content_hash, pm.taken_at, f.path
+                   FROM files f
+                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE f.missing = 0 AND f.live_photo_of IS NULL
+                     AND (pm.lat IS NULL)
+                   ORDER BY (pm.taken_at IS NULL), pm.taken_at DESC, f.id
+                   LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+            for r in rows:
+                if r["id"] in seen:
+                    continue
+                items.append({
+                    "id": r["id"], "hash": r["content_hash"],
+                    "taken_at": r["taken_at"], "path": r["path"],
+                })
+            return {"items": items, "remaining": _count_untagged(conn)}
+        finally:
+            conn.close()
+
+    def _upsert_location(conn, file_id, lat, lon, city, region, country):
+        conn.execute(
+            """INSERT INTO photo_meta (file_id, lat, lon, city, region, country)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(file_id) DO UPDATE SET
+                   lat=excluded.lat, lon=excluded.lon, city=excluded.city,
+                   region=excluded.region, country=excluded.country""",
+            (file_id, lat, lon, city, region, country),
+        )
+
+    @app.post("/photo/{file_id}/geotag")
+    async def geotag_photo(file_id: int, request: Request):
+        """Set a photo's location from a clicked map point.
+
+        Body: lat, lon (required); same_day ("1" to also tag every
+        untagged photo taken on the same calendar day). Reverse-geocodes
+        to city/region/country and stores lat/lon on photo_meta.
+        Returns {city, region, country, also_tagged}.
+        """
+        from .. import geo
+        form = await request.form()
+        try:
+            lat = float(form.get("lat"))
+            lon = float(form.get("lon"))
+        except (TypeError, ValueError):
+            return HTMLResponse("lat/lon required", 400)
+        same_day = form.get("same_day") in ("1", "true", "on")
+
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT id FROM files WHERE id=?", (file_id,)
+            ).fetchone()
+            if not row:
+                return HTMLResponse("not found", 404)
+
+            place = geo.reverse_geocode(lat, lon)
+            city = place.city if place else None
+            region = place.region if place else None
+            country = place.country if place else None
+
+            _upsert_location(conn, file_id, lat, lon, city, region, country)
+            also = 0
+
+            if same_day:
+                # Find this photo's date, then tag every untagged photo
+                # sharing that YYYY-MM-DD.
+                d = conn.execute(
+                    "SELECT taken_at FROM photo_meta WHERE file_id=?",
+                    (file_id,),
+                ).fetchone()
+                day = (d["taken_at"] or "")[:10] if d else ""
+                if len(day) == 10:
+                    peers = conn.execute(
+                        """SELECT f.id FROM files f
+                           LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                           WHERE f.missing = 0 AND f.live_photo_of IS NULL
+                             AND f.id != ?
+                             AND pm.lat IS NULL
+                             AND SUBSTR(pm.taken_at, 1, 10) = ?""",
+                        (file_id, day),
+                    ).fetchall()
+                    for p in peers:
+                        _upsert_location(conn, p["id"], lat, lon,
+                                         city, region, country)
+                        also += 1
+
+            return {
+                "city": city, "region": region, "country": country,
+                "also_tagged": also,
+            }
         finally:
             conn.close()
 

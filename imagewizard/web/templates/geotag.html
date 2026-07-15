@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title_extra %} — Geotag{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+    .geotag-wrap { display: grid; grid-template-columns: 340px 1fr; gap: 1rem; align-items: start; }
+    @media (max-width: 800px) { .geotag-wrap { grid-template-columns: 1fr; } }
+    #geo-map { height: calc(100vh - 130px); min-height: 400px; border-radius: 6px; }
+    .geo-photo img {
+        width: 100%; border-radius: 6px; background: var(--card);
+        max-height: 45vh; object-fit: contain;
+    }
+    .geo-panel { background: var(--card); border-radius: 6px; padding: 0.9rem; }
+    .geo-meta { font-size: 0.8rem; color: var(--muted); margin: 0.5rem 0; word-break: break-all; }
+    .geo-status { font-size: 0.9rem; min-height: 1.4em; margin: 0.5rem 0; }
+    .geo-status .ok { color: #6bcf7f; }
+    .geo-controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.6rem; }
+    .geo-controls button { flex: 1; }
+    .geo-controls .skip-btn { background: var(--accent); }
+    .geo-sameday { font-size: 0.8rem; color: var(--muted); display: flex; align-items: center; gap: 0.4rem; margin-top: 0.6rem; }
+    .geo-hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.5rem; line-height: 1.4; }
+    .geo-done { text-align: center; padding: 3rem 1rem; color: var(--muted); }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Add locations</h1>
+<div class="stats-bar" id="remaining-line">{{ n_untagged }} photos without a location</div>
+
+<div class="geotag-wrap">
+    <div class="geo-panel geo-photo" id="photo-panel">
+        <img id="geo-img" src="" alt="">
+        <div class="geo-meta" id="geo-meta"></div>
+        <div class="geo-status" id="geo-status">Click a spot on the map →</div>
+        <label class="geo-sameday">
+            <input type="checkbox" id="same-day">
+            Also tag all untagged photos from the same day
+        </label>
+        <div class="geo-controls">
+            <button id="save-btn" disabled>Save &amp; next</button>
+            <button class="skip-btn" id="skip-btn">Skip</button>
+        </div>
+        <a id="open-photo" href="#" target="_blank" class="geo-hint">Open this photo ↗</a>
+        <div class="geo-hint">
+            The clicked location stays put between photos, so a batch from
+            one place is just repeated “Save &amp; next”. City is resolved
+            offline from coordinates.
+        </div>
+    </div>
+    <div id="geo-map"></div>
+</div>
+
+<div class="geo-done" id="all-done" style="display:none;">
+    🎉 Every photo has a location. Nothing left to tag.
+</div>
+
+<script>
+const START_PHOTO = {{ start_photo if start_photo is not none else 'null' }};
+const map = L.map('geo-map').setView([20, 0], 2);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+let marker = null;
+let pending = null;        // {lat, lon}
+let queue = [];
+let offset = 0;
+let batchPhoto = START_PHOTO;   // pass ?photo= only on the first fetch
+
+const els = {
+    img: document.getElementById('geo-img'),
+    meta: document.getElementById('geo-meta'),
+    status: document.getElementById('geo-status'),
+    save: document.getElementById('save-btn'),
+    skip: document.getElementById('skip-btn'),
+    sameDay: document.getElementById('same-day'),
+    remaining: document.getElementById('remaining-line'),
+    openPhoto: document.getElementById('open-photo'),
+    panel: document.getElementById('photo-panel'),
+    done: document.getElementById('all-done'),
+};
+
+map.on('click', (e) => {
+    pending = { lat: e.latlng.lat, lon: e.latlng.lng };
+    if (marker) { marker.setLatLng(e.latlng); }
+    else { marker = L.marker(e.latlng, { draggable: true }).addTo(map);
+           marker.on('dragend', () => { const ll = marker.getLatLng(); pending = { lat: ll.lat, lon: ll.lng }; }); }
+    els.save.disabled = false;
+    els.status.textContent = `Location set (${pending.lat.toFixed(4)}, ${pending.lon.toFixed(4)}). Save to confirm.`;
+});
+
+async function fetchBatch() {
+    const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+    if (batchPhoto != null) { params.set('photo', String(batchPhoto)); batchPhoto = null; }
+    const r = await fetch('/geotag/queue.json?' + params.toString());
+    const data = await r.json();
+    queue = data.items;
+    offset += queue.length;
+    els.remaining.textContent = data.remaining + ' photos without a location';
+    return data.remaining;
+}
+
+function showCurrent() {
+    if (queue.length === 0) return;
+    const item = queue[0];
+    els.img.src = '/thumb/' + item.hash;
+    const date = (item.taken_at || '').slice(0, 16) || 'no date';
+    const name = (item.path || '').split('/').pop();
+    els.meta.textContent = date + '  ·  ' + name;
+    els.openPhoto.href = '/photo/' + item.id;
+    // Keep the marker/pending location from the previous photo so a
+    // same-place batch is fast; but require the map to already have one.
+    els.save.disabled = !pending;
+    els.status.textContent = pending
+        ? 'Reusing last location — click the map to change it, or Save.'
+        : 'Click a spot on the map →';
+}
+
+async function advance() {
+    queue.shift();
+    if (queue.length === 0) {
+        const remaining = await fetchBatch();
+        if (queue.length === 0 || remaining === 0) {
+            els.panel.style.display = 'none';
+            els.done.style.display = 'block';
+            return;
+        }
+    }
+    showCurrent();
+}
+
+els.save.addEventListener('click', async () => {
+    if (!pending || queue.length === 0) return;
+    const item = queue[0];
+    els.save.disabled = true;
+    const body = new FormData();
+    body.append('lat', pending.lat);
+    body.append('lon', pending.lon);
+    if (els.sameDay.checked) body.append('same_day', '1');
+    try {
+        const r = await fetch('/photo/' + item.id + '/geotag', { method: 'POST', body });
+        const res = await r.json();
+        const place = [res.city, res.region, res.country].filter(Boolean).join(', ');
+        let msg = 'Saved: ' + (place || 'coordinates');
+        if (res.also_tagged) msg += ` (+${res.also_tagged} same-day)`;
+        els.status.innerHTML = '<span class="ok">✓ ' + msg + '</span>';
+        // If we same-day-tagged, those peers may be in our local queue;
+        // simplest correct behaviour is to refetch from offset 0.
+        if (res.also_tagged) { offset = 0; queue = []; await fetchBatch(); showCurrent(); }
+        else { setTimeout(advance, 250); }
+    } catch (err) {
+        els.status.textContent = 'Save failed — try again.';
+        els.save.disabled = false;
+    }
+});
+
+els.skip.addEventListener('click', advance);
+
+(async function init() {
+    const remaining = await fetchBatch();
+    if (queue.length === 0 || remaining === 0) {
+        els.panel.style.display = 'none';
+        els.done.style.display = 'block';
+        return;
+    }
+    showCurrent();
+})();
+</script>
+{% endblock %}

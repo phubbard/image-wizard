@@ -302,6 +302,13 @@
             </tr>
             {% endif %}
             {% endif %}
+            {% if not meta or not meta['lat'] %}
+            <tr>
+                <td>GPS</td>
+                <td><a href="/geotag?photo={{ file['id'] }}"
+                       title="Place this photo on a map">+ Add location</a></td>
+            </tr>
+            {% endif %}
             <tr><td>Size</td><td>{{ file['width'] }}×{{ file['height'] }}</td></tr>
             <tr><td>File</td><td style="word-break:break-all;font-size:0.75rem;">{{ file['path'] }}</td></tr>
         </table>
