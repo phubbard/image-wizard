@@ -53,6 +53,9 @@
 <h1>Face Clusters</h1>
 <div class="stats-bar">
     {{ total }} clusters
+    {% if n_unnamed %}
+        · <a href="/faces/label">{{ n_unnamed }} unnamed — start labelling →</a>
+    {% endif %}
     · <span style="color:var(--muted);">typing an existing name auto-merges clusters</span>
 </div>
 

@@ -846,6 +846,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                        ORDER BY fa2.det_score DESC LIMIT 1) AS rep_file_id
                FROM face_clusters fc
                LEFT JOIN faces fa ON fa.cluster_id = fc.cluster_id
+               WHERE COALESCE(fc.hidden, 0) = 0
                GROUP BY fc.cluster_id
                HAVING COUNT(fa.id) > 0
                ORDER BY face_count DESC
@@ -871,6 +872,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
                 "people": _all_people(conn),
+                "n_unnamed": _count_unnamed_clusters(conn),
             })
         finally:
             conn.close()
@@ -886,6 +888,98 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "page": page,
                 "has_next": has_next,
             })
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Faces labelling flow — one unnamed cluster at a time
+    # ------------------------------------------------------------------
+
+    def _count_unnamed_clusters(conn) -> int:
+        row = conn.execute(
+            """SELECT COUNT(*) FROM face_clusters fc
+               WHERE fc.person_name IS NULL
+                 AND COALESCE(fc.hidden, 0) = 0
+                 AND EXISTS (SELECT 1 FROM faces fa
+                             WHERE fa.cluster_id = fc.cluster_id)"""
+        ).fetchone()
+        return row[0] if row else 0
+
+    @app.get("/faces/label", response_class=HTMLResponse)
+    async def faces_label_page(request: Request):
+        conn = get_conn()
+        try:
+            return TEMPLATES.TemplateResponse(request, "faces_label.html", {
+                "n_unnamed": _count_unnamed_clusters(conn),
+                "people": _all_people(conn),
+            })
+        finally:
+            conn.close()
+
+    @app.get("/faces/label/queue.json")
+    async def faces_label_queue(
+        offset: int = Query(0, ge=0),
+        limit: int = Query(20, ge=1, le=100),
+        samples: int = Query(6, ge=1, le=12),
+    ):
+        """Batch of unnamed, non-hidden clusters, most-common first.
+
+        Each entry carries a handful of representative face ids (highest
+        detection score) so the client can show face crops. Labelling
+        the biggest clusters first maximises coverage per click.
+        """
+        conn = get_conn()
+        try:
+            clusters = conn.execute(
+                """SELECT fc.cluster_id, COUNT(fa.id) AS face_count,
+                          MIN(pm.taken_at) AS first_date,
+                          MAX(pm.taken_at) AS last_date
+                   FROM face_clusters fc
+                   JOIN faces fa ON fa.cluster_id = fc.cluster_id
+                   LEFT JOIN photo_meta pm ON pm.file_id = fa.file_id
+                   WHERE fc.person_name IS NULL
+                     AND COALESCE(fc.hidden, 0) = 0
+                   GROUP BY fc.cluster_id
+                   ORDER BY face_count DESC
+                   LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+            items = []
+            for c in clusters:
+                faces = conn.execute(
+                    """SELECT fa.id, fa.file_id, f.content_hash
+                       FROM faces fa JOIN files f ON f.id = fa.file_id
+                       WHERE fa.cluster_id = ?
+                       ORDER BY fa.det_score DESC
+                       LIMIT ?""",
+                    (c["cluster_id"], samples),
+                ).fetchall()
+                items.append({
+                    "cluster_id": c["cluster_id"],
+                    "face_count": c["face_count"],
+                    "first_date": (c["first_date"] or "")[:10],
+                    "last_date": (c["last_date"] or "")[:10],
+                    "faces": [
+                        {"face_id": fr["id"], "file_id": fr["file_id"],
+                         "hash": fr["content_hash"]}
+                        for fr in faces
+                    ],
+                })
+            return {"items": items, "remaining": _count_unnamed_clusters(conn)}
+        finally:
+            conn.close()
+
+    @app.post("/faces/{cluster_id}/hide")
+    async def hide_cluster(cluster_id: int):
+        """Dismiss a cluster as junk (partial faces / non-faces). It's
+        excluded from the label queue and the Faces grid thereafter."""
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE face_clusters SET hidden=1 WHERE cluster_id=?",
+                (cluster_id,),
+            )
+            return {"hidden": cluster_id}
         finally:
             conn.close()
 
@@ -974,13 +1068,21 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     async def name_face(cluster_id: int, request: Request):
         form = await request.form()
         name = form.get("name", "").strip()
+        # The labelling flow POSTs json=1 and wants a JSON reply so it can
+        # advance without a full page reload; the Faces grid form wants
+        # the classic redirect back to /faces.
+        wants_json = form.get("json") in ("1", "true", "on")
         if not name:
+            if wants_json:
+                return HTMLResponse("name required", 400)
             return RedirectResponse("/faces", status_code=303)
         conn = get_conn()
         try:
             _apply_cluster_name(conn, cluster_id, name)
         finally:
             conn.close()
+        if wants_json:
+            return {"cluster_id": cluster_id, "name": name}
         return RedirectResponse("/faces", status_code=303)
 
     @app.post("/face/{face_id}/name")
@@ -1709,6 +1811,73 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     async def serve_apple_touch_icon():
         return FileResponse(WEB_DIR / "static" / "apple-touch-icon.png",
                             media_type="image/png")
+
+    @app.get("/face-crop/{face_id}")
+    async def serve_face_crop(face_id: int):
+        """Serve a cropped thumbnail of a single face, cached on disk.
+
+        Crops the face's bounding box (with padding for context) out of
+        the photo's 512px cached thumbnail. Used by the faces labelling
+        flow so the user sees actual faces rather than whole photos.
+        The face bbox is stored normalised, and the thumbnail is derived
+        from the same decoded (EXIF-rotated) image the detector ran on,
+        so the normalised coords map straight onto the thumbnail — the
+        later user `rotation` display setting doesn't affect this.
+        """
+        crop_path = cfg.cache_dir / "face_crops" / f"{face_id}.jpg"
+        if crop_path.exists():
+            return FileResponse(crop_path, media_type="image/jpeg")
+
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                """SELECT fa.x, fa.y, fa.w, fa.h, f.content_hash, f.path
+                   FROM faces fa JOIN files f ON f.id = fa.file_id
+                   WHERE fa.id = ?""",
+                (face_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or row["x"] is None:
+            return HTMLResponse("not found", 404)
+
+        try:
+            from PIL import Image
+            tp = thumb_path(cfg.cache_dir, row["content_hash"])
+            if not tp.exists():
+                # Generate the thumbnail on demand (reuses the decode +
+                # cache path). Fall back to the source file if needed.
+                from .. import decode
+                from ..thumbs import ensure_thumbnail
+                from ..scan import VIDEO_EXTS
+                src = Path(row["path"])
+                if not src.exists():
+                    return HTMLResponse("source missing", 404)
+                if src.suffix.lower() in VIDEO_EXTS:
+                    from ..video import extract_poster
+                    arr, _ = extract_poster(src)
+                else:
+                    arr = decode.load_image(src)
+                ensure_thumbnail(arr, cfg.cache_dir, row["content_hash"])
+
+            im = Image.open(tp).convert("RGB")
+            W, H = im.size
+            # Pad the bbox by 40% of its size for facial context.
+            x, y, w, h = row["x"], row["y"], row["w"], row["h"]
+            px, py = w * 0.4, h * 0.4
+            left = max(0, int((x - px) * W))
+            top = max(0, int((y - py) * H))
+            right = min(W, int((x + w + px) * W))
+            bottom = min(H, int((y + h + py) * H))
+            if right <= left or bottom <= top:
+                return HTMLResponse("degenerate bbox", 404)
+            crop = im.crop((left, top, right, bottom))
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            crop.save(crop_path, "JPEG", quality=85)
+            return FileResponse(crop_path, media_type="image/jpeg")
+        except Exception as e:
+            log.warning("face crop failed for face %s: %s", face_id, e)
+            return HTMLResponse("crop error", 500)
 
     @app.get("/thumb/{content_hash}")
     async def serve_thumb(content_hash: str):

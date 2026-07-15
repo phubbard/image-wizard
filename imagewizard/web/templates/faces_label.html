@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title_extra %} — Label faces{% endblock %}
+{% block head_extra %}
+<style>
+    .lbl-card {
+        max-width: 620px; margin: 0 auto; background: var(--card);
+        border-radius: 8px; padding: 1.2rem; text-align: center;
+    }
+    .lbl-faces {
+        display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap;
+        margin-bottom: 0.8rem;
+    }
+    .lbl-faces img {
+        width: 120px; height: 120px; object-fit: cover; border-radius: 8px;
+        background: var(--bg);
+    }
+    .lbl-faces img.small { width: 72px; height: 72px; }
+    .lbl-meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.8rem; }
+    .lbl-input {
+        width: 100%; max-width: 340px; font-size: 1.1rem; text-align: center;
+        padding: 0.5rem 0.7rem; margin-bottom: 0.3rem;
+    }
+    .lbl-hint { font-size: 0.75rem; color: #f7b731; min-height: 1.1em; margin-bottom: 0.6rem; }
+    .lbl-controls { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; }
+    .lbl-controls button { min-width: 120px; }
+    .lbl-controls .skip-btn { background: var(--accent); }
+    .lbl-controls .hide-btn { background: #6b3a3a; }
+    .lbl-progress { text-align: center; color: var(--muted); font-size: 0.85rem; margin: 0.6rem 0 1rem; }
+    .lbl-done { text-align: center; padding: 3rem 1rem; color: var(--muted); }
+    .lbl-open { font-size: 0.75rem; color: var(--muted); display: block; margin-top: 0.7rem; }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Label faces</h1>
+<div class="lbl-progress" id="progress">{{ n_unnamed }} unnamed clusters</div>
+
+<datalist id="people-list">
+    {% for p in people %}<option value="{{ p }}">{% endfor %}
+</datalist>
+
+<div class="lbl-card" id="card">
+    <div class="lbl-faces" id="faces"></div>
+    <div class="lbl-meta" id="meta"></div>
+    <input type="text" class="lbl-input" id="name-input" list="people-list"
+           autocomplete="off" placeholder="Who is this?">
+    <div class="lbl-hint" id="merge-hint"></div>
+    <div class="lbl-controls">
+        <button id="save-btn">Save &amp; next</button>
+        <button class="skip-btn" id="skip-btn">Skip</button>
+        <button class="hide-btn" id="hide-btn" title="Dismiss junk / non-face cluster">Not a person</button>
+    </div>
+    <a id="open-link" class="lbl-open" href="#" target="_blank">Open a photo from this cluster ↗</a>
+</div>
+
+<div class="lbl-done" id="done" style="display:none;">
+    🎉 Every cluster has a name. Nothing left to label.
+</div>
+
+<script>
+const peopleNames = new Set(
+    Array.from(document.querySelectorAll('#people-list option')).map(o => o.value.toLowerCase())
+);
+
+let queue = [];
+let offset = 0;
+const els = {
+    faces: document.getElementById('faces'),
+    meta: document.getElementById('meta'),
+    input: document.getElementById('name-input'),
+    hint: document.getElementById('merge-hint'),
+    save: document.getElementById('save-btn'),
+    skip: document.getElementById('skip-btn'),
+    hide: document.getElementById('hide-btn'),
+    progress: document.getElementById('progress'),
+    card: document.getElementById('card'),
+    done: document.getElementById('done'),
+    open: document.getElementById('open-link'),
+};
+
+async function fetchBatch() {
+    const r = await fetch(`/faces/label/queue.json?offset=${offset}&limit=20`);
+    const data = await r.json();
+    queue = data.items;
+    offset += queue.length;
+    els.progress.textContent = data.remaining + ' unnamed clusters';
+    return data.remaining;
+}
+
+function showCurrent() {
+    const c = queue[0];
+    if (!c) return;
+    // Render face crops: first one large, rest small.
+    els.faces.innerHTML = '';
+    c.faces.forEach((f, i) => {
+        const img = document.createElement('img');
+        img.src = `/face-crop/${f.face_id}`;
+        if (i > 0) img.className = 'small';
+        els.faces.appendChild(img);
+    });
+    const span = c.first_date && c.last_date && c.first_date !== c.last_date
+        ? `${c.first_date} → ${c.last_date}` : (c.first_date || '');
+    els.meta.textContent = `${c.face_count} photo${c.face_count === 1 ? '' : 's'}` + (span ? '  ·  ' + span : '');
+    els.open.href = c.faces.length ? `/photo/${c.faces[0].file_id}` : '#';
+    els.input.value = '';
+    els.hint.textContent = '';
+    els.input.focus();
+}
+
+async function advance() {
+    queue.shift();
+    if (queue.length === 0) {
+        const remaining = await fetchBatch();
+        if (queue.length === 0 || remaining === 0) {
+            els.card.style.display = 'none';
+            els.done.style.display = 'block';
+            return;
+        }
+    }
+    showCurrent();
+}
+
+els.input.addEventListener('input', () => {
+    const v = els.input.value.trim().toLowerCase();
+    els.hint.textContent = (v && peopleNames.has(v))
+        ? `↳ will merge into existing "${els.input.value.trim()}"` : '';
+});
+
+async function save() {
+    const c = queue[0];
+    const name = els.input.value.trim();
+    if (!c || !name) { els.input.focus(); return; }
+    els.save.disabled = true;
+    const body = new FormData();
+    body.append('name', name);
+    body.append('json', '1');
+    try {
+        await fetch(`/faces/${c.cluster_id}/name`, { method: 'POST', body });
+        if (!peopleNames.has(name.toLowerCase())) peopleNames.add(name.toLowerCase());
+        await advance();
+    } finally {
+        els.save.disabled = false;
+    }
+}
+
+els.save.addEventListener('click', save);
+els.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } });
+els.skip.addEventListener('click', advance);
+els.hide.addEventListener('click', async () => {
+    const c = queue[0];
+    if (!c) return;
+    await fetch(`/faces/${c.cluster_id}/hide`, { method: 'POST' });
+    advance();
+});
+
+(async function init() {
+    const remaining = await fetchBatch();
+    if (queue.length === 0 || remaining === 0) {
+        els.card.style.display = 'none';
+        els.done.style.display = 'block';
+        return;
+    }
+    showCurrent();
+})();
+</script>
+{% endblock %}

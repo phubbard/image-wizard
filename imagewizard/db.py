@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -249,6 +249,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     ):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fc_person ON face_clusters(person_id)"
+        )
+
+    # hidden: set on face clusters the user dismisses as junk (partial
+    # faces, non-faces InsightFace picked up) via the labelling flow.
+    # Excluded from the label queue and the Faces grid.
+    if "face_clusters" in tables:
+        _add_column(
+            conn, "face_clusters", "hidden",
+            "hidden INTEGER NOT NULL DEFAULT 0",
         )
 
     # decode_failed / decode_error: tombstone for files that errored during
