@@ -196,7 +196,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
             load_count = (page + 1) * per_page
             rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -239,7 +239,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             )
 
             rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -285,7 +285,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         names + multi-cluster splits collapse into one timeline.
         """
         return conn.execute(
-            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
+            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation,
                       pm.taken_at, pm.camera_model, pm.city, pm.country
                FROM (
                    SELECT DISTINCT fa.file_id AS fid
@@ -684,7 +684,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             vec_bytes = struct.pack(f"{len(vec)}f", *vec.tolist())
             rows = conn.execute(
                 """SELECT v.rowid AS id, v.distance, f.path, f.content_hash,
-                          f.kind, f.duration_sec, f.live_video_id,
+                          f.kind, f.duration_sec, f.live_video_id, f.rotation,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM vec_clip v
                    JOIN files f ON f.id = v.rowid
@@ -737,7 +737,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if camera:
             return conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
@@ -748,7 +748,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if country:
             return conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
@@ -937,6 +937,36 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    ORDER BY count DESC"""
             ).fetchall()
             return [{"name": r["name"], "count": r["count"]} for r in rows]
+        finally:
+            conn.close()
+
+    @app.post("/photo/{file_id}/rotate")
+    async def rotate_photo(file_id: int, request: Request):
+        """Apply a display rotation to a photo.
+
+        Body param ``delta`` is degrees clockwise: 90 (right), -90
+        (left), or 180. The stored rotation accumulates modulo 360.
+        Non-destructive — the original file and cached thumbnail are
+        untouched; the rotation is applied as a CSS transform at render
+        time. Returns JSON {"rotation": N}.
+        """
+        form = await request.form()
+        try:
+            delta = int(form.get("delta", "0"))
+        except (TypeError, ValueError):
+            delta = 0
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT rotation FROM files WHERE id=?", (file_id,)
+            ).fetchone()
+            if not row:
+                return HTMLResponse("not found", 404)
+            new_rot = (row["rotation"] + delta) % 360
+            conn.execute(
+                "UPDATE files SET rotation=? WHERE id=?", (new_rot, file_id)
+            )
+            return {"rotation": new_rot}
         finally:
             conn.close()
 
@@ -1211,7 +1241,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
     def _camera_photos(conn, where, params, limit, offset):
         return conn.execute(
-            f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.width, f.height,
+            f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation, f.width, f.height,
                        pm.taken_at, pm.camera_model, pm.city, pm.country
                 FROM files f
                 JOIN photo_meta pm ON pm.file_id = f.id
@@ -1303,7 +1333,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         lon_min, lon_max = lon - dlon, lon + dlon
 
         rows = conn.execute(
-            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
+            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.rotation,
                       pm.taken_at, pm.camera_model, pm.city, pm.country,
                       pm.lat, pm.lon
                FROM photo_meta pm

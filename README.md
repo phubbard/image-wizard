@@ -229,7 +229,13 @@ position you left.
 |------|-------------|
 | **Timeline** (`/`) | Photos by date with year + multi-month subheaders. Videos get a ▶ duration badge; iPhone Live Photos show once with a concentric-circles "LIVE" badge (the .MOV companion is hidden). |
 | **Search** (`/search`) | Free-text CLIP search ("dog on a beach"), plus filter dropdowns for object label, camera, named person, unnamed face cluster, and country. Prev/Next on photo detail walks the search results. |
-| **Photo detail** (`/photo/{id}`) | Full image with toggleable bounding boxes for objects (teal) and faces (yellow). Click a face box to name it inline. The Pipeline section in the sidebar shows the four ML stage flags (✓/✗) so you can tell whether missing detections are a pipeline gap or a genuinely empty result. Decode failures are flagged in red with the recorded error. |
+| **Photo detail** (`/photo/{id}`) | Full image with toggleable bounding boxes for objects (teal) and faces (yellow). Click a face box to name it inline. Rotate controls (↺ ↻ ⤢) fix images whose EXIF orientation is missing. The Pipeline section in the sidebar shows the four ML stage flags (✓/✗) so you can tell whether missing detections are a pipeline gap or a genuinely empty result. Decode failures are flagged in red with the recorded error. |
+
+**Rotating photos** (for old scans with no EXIF orientation): right-click
+any grid thumbnail for a rotate menu (left/right 90°, 180°), or use the
+↺ ↻ ⤢ buttons on the photo detail page. Rotation is stored per-photo and
+applied as a CSS transform — non-destructive (the original file and its
+cached thumbnail are never re-encoded), instant, and reversible.
 | **Person** (`/person/{name}`) | Per-person timeline. Aggregates every face cluster sharing this identity (handles multi-cluster + multi-name same-person cases). Shows a "through the years" face strip and a "names through time" editor for adding name epochs (`Amy Bee` until 2012-07-01, `Amy Smith` after) — caption text on each photo uses the era-appropriate name. |
 | **Faces** (`/faces`) | Grid of face clusters with autocomplete naming. Typing an existing name auto-merges clusters. Multi-select for explicit merges. Pagination via infinite scroll. |
 | **Cameras** (`/cameras`) → **Camera detail** (`/camera/{model}`) | Camera summaries; per-camera detail page filters to that model. Phones with multiple lens modules get a sub-pill row (Ultra wide / Main / Telephoto / Front) — the same physical lens may appear under several EXIF strings depending on camera mode, and the pills group those together. |

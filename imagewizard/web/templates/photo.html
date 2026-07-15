@@ -92,6 +92,21 @@
     .toggle-bar { margin: 0.5rem 0; display: flex; gap: 1rem; align-items: center; }
     .toggle-bar label { font-size: 0.85rem; cursor: pointer; user-select: none; }
     .toggle-bar input[type=checkbox] { accent-color: var(--highlight); }
+    .rotate-controls { display: inline-flex; gap: 4px; }
+    .rot-btn {
+        background: var(--card);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 2px 9px;
+        font-size: 1rem;
+        line-height: 1.2;
+        cursor: pointer;
+    }
+    .rot-btn:hover { background: var(--accent); opacity: 1; }
+    /* Wrapper that reserves the rotated footprint for 90/270 so the
+       rotated image + its bboxes don't overflow the layout. */
+    #img-wrap { transition: none; }
     .full-link { font-size: 0.8rem; color: var(--muted); margin-left: auto; }
     .full-link:hover { color: var(--highlight); }
     .photo-nav {
@@ -183,6 +198,13 @@
             {% endif %}
             {% if faces %}
             <label><input type="checkbox" id="toggle-faces"> Faces</label>
+            {% endif %}
+            {% if file['kind'] != 'video' %}
+            <span class="rotate-controls">
+                <button type="button" class="rot-btn" data-delta="-90" title="Rotate left">↺</button>
+                <button type="button" class="rot-btn" data-delta="90" title="Rotate right">↻</button>
+                <button type="button" class="rot-btn" data-delta="180" title="Rotate 180°">⤢</button>
+            </span>
             {% endif %}
             <a href="/full/{{ file['id'] }}" target="_blank" class="full-link">View full image</a>
         </div>
@@ -394,10 +416,49 @@ const FILE_ID = {{ file['id'] }};
     video.addEventListener('ended', showStill);
 })();
 
+// --- Detail-page rotation ---------------------------------------------
+// Rotate the whole #img-wrap (image + bounding boxes) as a unit so the
+// face/object boxes stay aligned. For 90/270 we swap the wrapper's
+// reserved footprint so the rotated image doesn't overlap the sidebar.
+let detailRotation = {{ file['rotation'] or 0 }};
+
+function applyDetailRotation() {
+    const wrap = document.getElementById('img-wrap');
+    const img = document.getElementById('detail-img');
+    if (!wrap || !img) return;
+    const deg = ((detailRotation % 360) + 360) % 360;
+    wrap.style.transformOrigin = 'center center';
+    wrap.style.transform = deg ? `rotate(${deg}deg)` : '';
+    if (deg % 180 !== 0) {
+        // Reserve the rotated footprint: what was H becomes W and vice versa.
+        wrap.style.width = img.clientHeight + 'px';
+        wrap.style.height = img.clientWidth + 'px';
+        // Constrain so a rotated portrait doesn't exceed the column.
+        img.style.maxWidth = '70vh';
+    } else {
+        wrap.style.width = '';
+        wrap.style.height = '';
+        img.style.maxWidth = '';
+    }
+}
+
+document.querySelectorAll('.rot-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const delta = parseInt(btn.dataset.delta, 10);
+        detailRotation = ((detailRotation + delta) % 360 + 360) % 360;
+        applyDetailRotation();
+        const body = new FormData();
+        body.append('delta', String(delta));
+        fetch(`/photo/${FILE_ID}/rotate`, { method: 'POST', body });
+    });
+});
+
 function placeBboxes() {
     const img = document.getElementById('detail-img');
     const imgW = img.clientWidth;
     const imgH = img.clientHeight;
+    // Apply any stored/user rotation once the image has its dimensions.
+    applyDetailRotation();
 
     document.querySelectorAll('.bbox').forEach(el => {
         const x = parseFloat(el.dataset.x);

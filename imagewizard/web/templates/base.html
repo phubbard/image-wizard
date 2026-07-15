@@ -181,6 +181,31 @@
         .face-card form { margin-top: 0.3rem; }
         .face-card input[type=text] { width: 100%; margin-bottom: 0.3rem; }
         .stats-bar { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.5rem; }
+        /* Right-click rotate menu shown over grid thumbnails. */
+        #ctx-menu {
+            position: fixed;
+            z-index: 1000;
+            display: none;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            padding: 4px;
+            min-width: 160px;
+        }
+        #ctx-menu button {
+            display: block;
+            width: 100%;
+            text-align: left;
+            background: none;
+            color: var(--fg);
+            border: none;
+            padding: 7px 12px;
+            font-size: 0.85rem;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #ctx-menu button:hover { background: var(--accent); opacity: 1; }
     </style>
     {% block head_extra %}{% endblock %}
 </head>
@@ -203,5 +228,51 @@
     <div class="container">
         {% block content %}{% endblock %}
     </div>
+
+    <div id="ctx-menu">
+        <button data-delta="-90">↺ Rotate left 90°</button>
+        <button data-delta="90">↻ Rotate right 90°</button>
+        <button data-delta="180">⤢ Rotate 180°</button>
+    </div>
+    <script>
+    // Right-click rotate menu for grid thumbnails. Applies the rotation
+    // as a CSS transform immediately and persists it via POST. Works on
+    // any page with a .grid (timeline, search, person, camera, nearby).
+    (function () {
+        const menu = document.getElementById('ctx-menu');
+        let targetImg = null;   // the <img> we'll rotate
+        let targetId = null;    // its file id
+
+        document.addEventListener('contextmenu', function (e) {
+            const anchor = e.target.closest('.grid a[data-photo-id]');
+            if (!anchor) { menu.style.display = 'none'; return; }
+            e.preventDefault();
+            targetImg = anchor.querySelector('img');
+            targetId = anchor.dataset.photoId;
+            menu.style.display = 'block';
+            // Keep the menu on-screen near the cursor.
+            const mw = menu.offsetWidth || 160, mh = menu.offsetHeight || 110;
+            menu.style.left = Math.min(e.clientX, window.innerWidth - mw - 8) + 'px';
+            menu.style.top = Math.min(e.clientY, window.innerHeight - mh - 8) + 'px';
+        });
+
+        document.addEventListener('click', function (e) {
+            if (!menu.contains(e.target)) { menu.style.display = 'none'; return; }
+            const btn = e.target.closest('button[data-delta]');
+            if (!btn || !targetImg || !targetId) return;
+            const delta = parseInt(btn.dataset.delta, 10);
+            const cur = parseInt(targetImg.dataset.rotation || '0', 10);
+            const next = ((cur + delta) % 360 + 360) % 360;
+            targetImg.dataset.rotation = next;
+            targetImg.style.transform = next ? `rotate(${next}deg)` : '';
+            menu.style.display = 'none';
+            const body = new FormData();
+            body.append('delta', String(delta));
+            fetch(`/photo/${targetId}/rotate`, { method: 'POST', body });
+        });
+
+        window.addEventListener('scroll', () => { menu.style.display = 'none'; });
+    })();
+    </script>
 </body>
 </html>

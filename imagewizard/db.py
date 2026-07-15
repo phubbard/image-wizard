@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -312,6 +312,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_files_live_video_id "
             "ON files(live_video_id)"
         )
+
+    # rotation: user-applied display rotation in degrees clockwise
+    # (0/90/180/270), on top of whatever EXIF orientation already did at
+    # decode time. Applied as a CSS transform in the grid + detail views
+    # so it's non-destructive and instant — the original file and its
+    # cached thumbnail are never re-encoded. For fixing old scans whose
+    # EXIF orientation tag is missing.
+    _add_column(
+        conn, "files", "rotation", "rotation INTEGER NOT NULL DEFAULT 0"
+    )
 
 
 def _backfill_persons(conn: sqlite3.Connection) -> None:
