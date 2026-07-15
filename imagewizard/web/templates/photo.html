@@ -9,6 +9,28 @@
         cursor: pointer;
     }
     .img-wrap img { max-width: 100%; max-height: 70vh; border-radius: 6px; }
+    .img-wrap video { max-width: 100%; max-height: 70vh; }
+    /* LIVE play button on a Live Photo still detail view. */
+    #live-play-btn {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        background: rgba(0,0,0,0.6);
+        color: #fff;
+        border: none;
+        font-size: 0.8rem;
+        font-weight: 600;
+        line-height: 1;
+        padding: 5px 10px 5px 8px;
+        border-radius: 14px;
+        cursor: pointer;
+    }
+    #live-play-btn:hover { background: rgba(0,0,0,0.8); }
+    #live-play-btn svg { width: 15px; height: 15px; display: block; }
     .bbox {
         position: absolute;
         border: 2px solid;
@@ -183,6 +205,24 @@
             </video>
             <img src="/thumb/{{ file['content_hash'] }}" id="detail-img"
                  alt="" onload="placeBboxes()" style="display:none;">
+            {% elif file['live_video_id'] %}
+            {# Live Photo still: show the still with bounding boxes as
+               usual, plus a LIVE button that plays the companion .MOV
+               inline (Apple Photos style). The still stays the primary
+               view; the video is loaded on demand. #}
+            <img src="/full/{{ file['id'] }}" id="detail-img" alt=""
+                 onload="placeBboxes()">
+            <video id="live-video" src="/full/{{ file['live_video_id'] }}"
+                   poster="/thumb/{{ file['content_hash'] }}"
+                   preload="none" playsinline
+                   style="display:none;width:100%;border-radius:6px;"></video>
+            <button id="live-play-btn" title="Play Live Photo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
+                    <circle cx="12" cy="12" r="6.5" stroke-dasharray="2 2.5"/>
+                    <circle cx="12" cy="12" r="9.5" stroke-dasharray="1.5 3"/>
+                </svg>LIVE
+            </button>
             {% else %}
             <img src="/full/{{ file['id'] }}" id="detail-img" alt=""
                  onload="placeBboxes()">
@@ -324,6 +364,35 @@
 
 <script>
 const FILE_ID = {{ file['id'] }};
+
+// Live Photo: clicking the LIVE button swaps the still for the
+// companion video, plays it, then reverts to the still when it ends.
+// Bounding boxes are hidden during playback (they're positioned over
+// the still, not the video frame).
+(function initLivePhoto() {
+    const btn = document.getElementById('live-play-btn');
+    const video = document.getElementById('live-video');
+    const img = document.getElementById('detail-img');
+    if (!btn || !video || !img) return;
+
+    function showStill() {
+        video.pause();
+        video.style.display = 'none';
+        img.style.display = '';
+        btn.style.display = '';
+        document.querySelectorAll('.bbox').forEach(b => b.style.visibility = '');
+    }
+    function playLive() {
+        img.style.display = 'none';
+        btn.style.display = 'none';
+        document.querySelectorAll('.bbox').forEach(b => b.style.visibility = 'hidden');
+        video.style.display = '';
+        video.currentTime = 0;
+        video.play().catch(() => showStill());
+    }
+    btn.addEventListener('click', (e) => { e.stopPropagation(); playLive(); });
+    video.addEventListener('ended', showStill);
+})();
 
 function placeBboxes() {
     const img = document.getElementById('detail-img');

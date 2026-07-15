@@ -132,10 +132,12 @@ image-wizard check-missing --dry-run
 image-wizard check-missing
 
 # iPhone Live Photos land as HEIC+MOV pairs with matching basenames.
-# The .MOV is 1-2s of motion around the still — showing it as a
-# separate video in the timeline looks like a duplicate. `rescan`
-# runs this automatically as its final step; use the CLI to run it
-# by hand or to re-check after fixing a bad match.
+# The .MOV is 1-2s of motion around the still. The pipeline hides the
+# .MOV, shows just the still in every grid with an Apple-style "LIVE"
+# badge (concentric circles) in the upper-right corner, and on the
+# photo detail page a LIVE button plays the companion video inline.
+# `rescan` runs this automatically as its final step; use the CLI to
+# run it by hand or to re-check after fixing a bad match.
 image-wizard find-live-photos
 image-wizard find-live-photos --rescan-all      # re-evaluate everything
 
@@ -225,7 +227,7 @@ position you left.
 
 | Page | What it does |
 |------|-------------|
-| **Timeline** (`/`) | Photos by date with year + multi-month subheaders. |
+| **Timeline** (`/`) | Photos by date with year + multi-month subheaders. Videos get a ▶ duration badge; iPhone Live Photos show once with a concentric-circles "LIVE" badge (the .MOV companion is hidden). |
 | **Search** (`/search`) | Free-text CLIP search ("dog on a beach"), plus filter dropdowns for object label, camera, named person, unnamed face cluster, and country. Prev/Next on photo detail walks the search results. |
 | **Photo detail** (`/photo/{id}`) | Full image with toggleable bounding boxes for objects (teal) and faces (yellow). Click a face box to name it inline. The Pipeline section in the sidebar shows the four ML stage flags (✓/✗) so you can tell whether missing detections are a pipeline gap or a genuinely empty result. Decode failures are flagged in red with the recorded error. |
 | **Person** (`/person/{name}`) | Per-person timeline. Aggregates every face cluster sharing this identity (handles multi-cluster + multi-name same-person cases). Shows a "through the years" face strip and a "names through time" editor for adding name epochs (`Amy Bee` until 2012-07-01, `Amy Smith` after) — caption text on each photo uses the era-appropriate name. |

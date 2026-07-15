@@ -230,6 +230,24 @@ def detect_live_photos(conn, only_new: bool = True) -> int:
                 (still_id, r["id"]),
             )
             flagged += 1
+
+    # Reconcile the reverse links: every still that a .MOV points at
+    # gets live_video_id set back to that .MOV. Runs unconditionally so
+    # it also backfills pairs detected before the live_video_id column
+    # existed. Clear stale reverse links first so a since-deleted .MOV
+    # doesn't leave a dangling badge.
+    conn.execute("UPDATE files SET live_video_id=NULL")
+    conn.execute(
+        """UPDATE files SET live_video_id = (
+               SELECT mov.id FROM files mov
+               WHERE mov.live_photo_of = files.id AND mov.missing = 0
+               ORDER BY mov.id LIMIT 1
+           )
+           WHERE id IN (
+               SELECT DISTINCT live_photo_of FROM files
+               WHERE live_photo_of IS NOT NULL AND missing = 0
+           )"""
+    )
     return flagged
 
 

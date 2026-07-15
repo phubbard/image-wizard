@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -299,6 +299,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_live_photo_of "
             "ON files(live_photo_of)"
+        )
+
+    # live_video_id: the reverse of live_photo_of. On a Live Photo's
+    # still, points at the .MOV companion's file id. Denormalised so the
+    # grid queries can render the "Live" badge and the detail page can
+    # wire up click-to-play without a correlated subquery per row.
+    if _add_column(
+        conn, "files", "live_video_id", "live_video_id INTEGER"
+    ):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_live_video_id "
+            "ON files(live_video_id)"
         )
 
 

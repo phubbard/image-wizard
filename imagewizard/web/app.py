@@ -196,7 +196,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
             load_count = (page + 1) * per_page
             rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -239,7 +239,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             )
 
             rows = conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.width, f.height,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.width, f.height,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -285,7 +285,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         names + multi-cluster splits collapse into one timeline.
         """
         return conn.execute(
-            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
+            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
                       pm.taken_at, pm.camera_model, pm.city, pm.country
                FROM (
                    SELECT DISTINCT fa.file_id AS fid
@@ -684,6 +684,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             vec_bytes = struct.pack(f"{len(vec)}f", *vec.tolist())
             rows = conn.execute(
                 """SELECT v.rowid AS id, v.distance, f.path, f.content_hash,
+                          f.kind, f.duration_sec, f.live_video_id,
                           pm.taken_at, pm.camera_model, pm.city, pm.country
                    FROM vec_clip v
                    JOIN files f ON f.id = v.rowid
@@ -736,7 +737,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if camera:
             return conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
@@ -747,7 +748,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             ).fetchall()
         if country:
             return conn.execute(
-                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
+                f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
@@ -1210,7 +1211,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
     def _camera_photos(conn, where, params, limit, offset):
         return conn.execute(
-            f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.width, f.height,
+            f"""SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id, f.width, f.height,
                        pm.taken_at, pm.camera_model, pm.city, pm.country
                 FROM files f
                 JOIN photo_meta pm ON pm.file_id = f.id
@@ -1302,7 +1303,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         lon_min, lon_max = lon - dlon, lon + dlon
 
         rows = conn.execute(
-            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec,
+            """SELECT f.id, f.path, f.content_hash, f.kind, f.duration_sec, f.live_video_id,
                       pm.taken_at, pm.camera_model, pm.city, pm.country,
                       pm.lat, pm.lon
                FROM photo_meta pm
