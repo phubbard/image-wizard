@@ -1541,6 +1541,13 @@ def register(parent: typer.Typer) -> None:
                  "copies get hidden automatically. On by default; the phash "
                  "pass is incremental so it's cheap after the first run.",
         ),
+        suggest_rotations: bool = typer.Option(
+            True, "--suggest-rotations/--no-suggest-rotations",
+            help="Run the orientation model over new photos and record "
+                 "rotation suggestions (reviewed at /rotations). Skipped "
+                 "unless a model has been trained (train-orientation). "
+                 "Incremental, so cheap after the first run.",
+        ),
     ) -> None:
         """Cron-friendly one-shot: rescan → babysit-index → dedupe → cluster-faces.
 
@@ -1643,6 +1650,15 @@ def register(parent: typer.Typer) -> None:
         from . import ocr as _ocr_mod
         if _ocr_mod.available():
             phases.append(("ocr", ["ocr"], phase("ocr", ["ocr"])))
+
+        # Orientation suggestions — only if a model has been trained, so
+        # this is a clean no-op until the user runs `train-orientation`
+        # (rather than a failed phase). Incremental: only new photos.
+        if suggest_rotations:
+            from .models import orientation as _orient_mod
+            if _orient_mod.available(cfg.cache_dir):
+                phases.append(("suggest-rotations", ["suggest-rotations"],
+                               phase("suggest-rotations", ["suggest-rotations"])))
 
         # Summary — silent on success, one line to stdout on failure so
         # cron mails it.
