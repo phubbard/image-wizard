@@ -291,10 +291,15 @@ def compute_phashes(conn, cache_dir, console=None, workers: int = 4) -> int:
     from PIL import Image
     from .thumbs import thumb_path, ensure_thumbnail
 
+    # Photos only — perceptual hashing is for finding duplicate images.
+    # Videos would force a poster-frame decode (slow, and corrupt .MOVs
+    # spew ffmpeg errors); byte-identical duplicate videos are still
+    # caught by the default content_hash mode.
     rows = conn.execute(
         """SELECT id, content_hash, path FROM files
            WHERE missing = 0 AND too_small = 0 AND phash IS NULL
-             AND dup_of IS NULL AND content_hash != ''"""
+             AND dup_of IS NULL AND content_hash != ''
+             AND COALESCE(kind, 'image') != 'video'"""
     ).fetchall()
     if not rows:
         return 0
@@ -918,6 +923,9 @@ def register(parent: typer.Typer) -> None:
             # Grouping key: exact content_hash (default) or perceptual
             # phash (--visual, for byte-different visual duplicates).
             key_col = "phash" if visual else "content_hash"
+            # --visual is photos-only (a video poster-frame phash could
+            # spuriously collide); the default byte mode covers videos.
+            extra = "AND COALESCE(kind,'image') != 'video'" if visual else ""
             if visual:
                 n = compute_phashes(conn, cfg.cache_dir, console)
                 if n:
@@ -927,7 +935,7 @@ def register(parent: typer.Typer) -> None:
                 f"""SELECT {key_col} AS gkey, COUNT(*) AS cnt
                     FROM files
                     WHERE missing = 0 AND too_small = 0 AND dup_of IS NULL
-                      AND {key_col} IS NOT NULL AND {key_col} != ''
+                      AND {key_col} IS NOT NULL AND {key_col} != '' {extra}
                     GROUP BY {key_col}
                     HAVING cnt > 1
                     ORDER BY cnt DESC"""
@@ -992,7 +1000,8 @@ def register(parent: typer.Typer) -> None:
                                    pm.lat AS lat, pm.taken_at AS taken_at
                             FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
                             WHERE f.{key_col} = ? AND f.missing = 0
-                              AND f.dup_of IS NULL""",
+                              AND f.dup_of IS NULL
+                              {extra.replace('kind', 'f.kind')}""",
                         (h["gkey"],),
                     ).fetchall()
                     if len(rows) < 2:
@@ -1035,13 +1044,18 @@ def register(parent: typer.Typer) -> None:
                             console.print(f"    [red]error:[/red] {e}")
                     conn.commit()
 
-            if prog_ctx:
-                with prog_ctx as prog:
-                    task = prog.add_task("dedup", total=min(
-                        total_groups, limit or total_groups))
-                    _run(track=lambda: prog.advance(task))
-            else:
-                _run()
+            # Pure dry run (no --delete/--dedupe-index, not --verbose) has
+            # nothing to do per group — the summary above is the whole
+            # output. Skip the per-group loop so it returns immediately
+            # instead of running 20k+ no-op queries (which looked hung).
+            if acting or verbose:
+                if prog_ctx:
+                    with prog_ctx as prog:
+                        task = prog.add_task("dedup", total=min(
+                            total_groups, limit or total_groups))
+                        _run(track=lambda: prog.advance(task))
+                else:
+                    _run()
 
             if delete:
                 mb = freed_bytes / (1024 * 1024)
