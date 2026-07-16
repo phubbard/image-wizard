@@ -512,17 +512,21 @@ image-wizard last-crash -n 80 --kernel
 image-wizard babysit-index
 image-wizard babysit-index -- --workers 4 --no-clip   # pass through
 
-# Cron-friendly one-shot: rescan → babysit-index → cluster-faces, with
-# an fcntl lock so a slow prior run doesn't overlap the next scheduled
-# tick. Silent on success; prints one summary line to stderr on failure
-# (so cron mails you only when something needs attention). Full
-# subprocess output goes to <cache>/logs/refresh.log for post-hoc
-# inspection.
+# Cron-friendly one-shot: rescan → babysit-index → find-duplicates → 
+# cluster-faces (→ ocr), with an fcntl lock so a slow prior run doesn't
+# overlap the next scheduled tick. Silent on success; prints one summary
+# line to stderr on failure (so cron mails you only when something needs
+# attention). Full subprocess output goes to <cache>/logs/refresh.log.
+#
+# The find-duplicates phase (perceptual, --dedupe-index) hides re-imported
+# / re-exported copies automatically so duplicates don't accumulate between
+# runs; the phash pass is incremental so it's cheap after the first run.
 #
 # Exit codes: 0 = all phases OK, 1 = one or more failed, 2 = another
 # refresh already running (concurrent skip — safe to ignore).
 image-wizard refresh
 image-wizard refresh --workers 4 --walk-workers 16    # phase tuning
+image-wizard refresh --no-dedupe                      # skip the dedup phase
 ```
 
 ### Scheduled refresh

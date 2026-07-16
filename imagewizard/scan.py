@@ -1534,8 +1534,15 @@ def register(parent: typer.Typer) -> None:
             help="Refuse to start if another refresh is already running "
                  "(via an fcntl lock in the cache dir). On by default.",
         ),
+        dedupe: bool = typer.Option(
+            True, "--dedupe/--no-dedupe",
+            help="Run perceptual duplicate detection (find-duplicates "
+                 "--visual --dedupe-index) so re-imported / re-exported "
+                 "copies get hidden automatically. On by default; the phash "
+                 "pass is incremental so it's cheap after the first run.",
+        ),
     ) -> None:
-        """Cron-friendly one-shot: rescan → babysit-index → cluster-faces.
+        """Cron-friendly one-shot: rescan → babysit-index → dedupe → cluster-faces.
 
         Fire this from cron / launchd on a schedule and the DB will keep
         current. All three phases append timestamped output to
@@ -1618,6 +1625,15 @@ def register(parent: typer.Typer) -> None:
         babysit_args = ["babysit-index", "--", "--workers", str(workers)]
         phases.append(("babysit-index", babysit_args,
                        phase("babysit-index", babysit_args)))
+
+        # Perceptual dedup: hide re-imported / re-exported copies whose bytes
+        # differ (so content_hash won't catch them). Runs after indexing so
+        # new photos have thumbnails to phash; incremental, so only new
+        # photos are hashed each time.
+        if dedupe:
+            dd_args = ["find-duplicates", "--visual", "--dedupe-index"]
+            phases.append(("find-duplicates", dd_args,
+                           phase("find-duplicates", dd_args)))
 
         phases.append(("cluster-faces", ["cluster-faces"],
                        phase("cluster-faces", ["cluster-faces"])))
