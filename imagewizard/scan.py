@@ -108,6 +108,7 @@ _GENERATED_CROP_PATTERN = re.compile(r"_face\d+\.(jpg|jpeg|png)$", re.IGNORECASE
 # photos still get indexed.
 _PHOTO_LIBRARY_SKIP_DIRS = frozenset({
     # modern .photoslibrary
+    "Previews",  # rendered preview derivatives — not originals
     "Thumbnails", "resources", "private", "external",
     "database", "scopes",
     # iPhoto Library
@@ -2659,5 +2660,73 @@ def register(parent: typer.Typer) -> None:
                         console.print(f"  {kmap[k]['path']}")
                 show("A only", only_a, ka)
                 show("B only", only_b, kb)
+        finally:
+            conn.close()
+
+    @parent.command(name="prune-path")
+    def cmd_prune_path(
+        substring: str = typer.Argument(
+            ..., help="Delete indexed rows whose path contains this substring."),
+        delete: bool = typer.Option(
+            False, "--delete", help="Actually delete (default is a dry run)."),
+        show: int = typer.Option(
+            20, "--show", help="How many example paths to print."),
+    ) -> None:
+        """Delete indexed rows whose path contains a substring (dry-run default).
+
+        For pruning derivative junk that should never have been indexed
+        (e.g. Apple Photos `Previews/` inside a .photoslibrary) or dropping
+        a scan tree you've decided to abandon. Cascades through detections /
+        faces / vec_* / ocr_fts via delete_file_row. The files on disk are
+        NOT touched — only the index rows. Dry-run by default; pass --delete
+        to act.
+
+        Note: this removes rows but leaves scan_roots alone, so a future
+        scan of a still-listed root could re-add matching files. For
+        derivative dirs, the walker already skips them (Previews/Thumbnails/
+        resources inside a photo library) so they won't come back; to drop
+        a whole root, also remove it from the scan set.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            rows = conn.execute(
+                "SELECT id, path FROM files WHERE path LIKE ?",
+                (f"%{substring}%",),
+            ).fetchall()
+            console.print(
+                f"[bold]{len(rows)} row(s)[/bold] match path substring "
+                f"{substring!r}"
+            )
+            for r in rows[:show]:
+                console.print(f"  #{r['id']:8d}  {r['path']}")
+            if len(rows) > show:
+                console.print(f"  ... and {len(rows) - show} more")
+            if not delete:
+                console.print(
+                    "[yellow]dry run[/yellow] — pass --delete to remove "
+                    "these rows (files on disk are never touched)"
+                )
+                return
+            if not rows:
+                return
+
+            from rich.progress import Progress, BarColumn, MofNCompleteColumn, SpinnerColumn
+            n = 0
+            with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                          console=Console(stderr=True)) as prog:
+                task = prog.add_task("pruning", total=len(rows))
+                for r in rows:
+                    delete_file_row(conn, r["id"])
+                    n += 1
+                    if n % 500 == 0:
+                        conn.commit()
+                    prog.advance(task)
+            conn.commit()
+            console.print(
+                f"[green]deleted {n} row(s)[/green] "
+                "(source files on disk untouched)"
+            )
         finally:
             conn.close()

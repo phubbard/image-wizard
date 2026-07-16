@@ -231,6 +231,21 @@ subset root, lose nothing), `identical sets`, or `partial overlap` (each
 has unique photos — dedupe instead of dropping a root). Photos with no
 capture date can't be keyed and are excluded from the verdict.
 
+```bash
+# Delete indexed rows whose path contains a substring (dry-run by default).
+# For pruning derivative junk that shouldn't have been indexed, or dropping
+# a scan tree. Cascades through detections/faces/vec_*/ocr_fts; the files on
+# disk are never touched.
+image-wizard prune-path "photoslibrary/Previews"            # dry run
+image-wizard prune-path "photoslibrary/Previews" --delete   # remove the rows
+```
+
+Note: the walker already **skips** the derivative subtrees inside an Apple
+photo library — `Previews/`, `Thumbnails/`, `resources/`, etc. — and keeps
+`originals/` / `Masters/`. `prune-path` is for removing rows that a
+*previous* scan indexed before that exclusion applied (e.g. the `Previews/`
+skip, added after some libraries were already indexed).
+
 ### Maintenance & repair
 
 ```bash
