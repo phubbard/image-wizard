@@ -201,7 +201,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
                    WHERE {where}
-                   ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+                   ORDER BY COALESCE(pm.taken_at, f.mtime) DESC, f.id DESC
                    LIMIT ?""",
                 params + [load_count],
             ).fetchall()
@@ -244,7 +244,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    FROM files f
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
                    WHERE {where}
-                   ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+                   ORDER BY COALESCE(pm.taken_at, f.mtime) DESC, f.id DESC
                    LIMIT ? OFFSET ?""",
                 params + [per_page, offset],
             ).fetchall()
@@ -296,7 +296,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                ) t
                JOIN files f ON f.id = t.fid
                LEFT JOIN photo_meta pm ON pm.file_id = f.id
-               ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+               ORDER BY COALESCE(pm.taken_at, f.mtime) DESC, f.id DESC
                LIMIT ? OFFSET ?""",
             (person_id, limit, offset),
         ).fetchall()
@@ -599,23 +599,27 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 taken_at = meta["taken_at"] if meta else None
                 sort_key = taken_at or str(f["mtime"])
 
+                # Row-value comparison on (sort_key, id) so prev/next step
+                # one photo at a time through same-day siblings. A scalar
+                # "> sort_key" would skip the entire tied group (all the
+                # same-date scanned photos share one sort_key).
                 prev_photo = conn.execute(
                     """SELECT f.id FROM files f
                        LEFT JOIN photo_meta pm ON pm.file_id = f.id
                        WHERE f.missing = 0 AND f.live_photo_of IS NULL
-                         AND COALESCE(pm.taken_at, f.mtime) > ?
-                       ORDER BY COALESCE(pm.taken_at, f.mtime) ASC
+                         AND (COALESCE(pm.taken_at, f.mtime), f.id) > (?, ?)
+                       ORDER BY COALESCE(pm.taken_at, f.mtime) ASC, f.id ASC
                        LIMIT 1""",
-                    (sort_key,),
+                    (sort_key, f["id"]),
                 ).fetchone()
                 next_photo = conn.execute(
                     """SELECT f.id FROM files f
                        LEFT JOIN photo_meta pm ON pm.file_id = f.id
                        WHERE f.missing = 0 AND f.live_photo_of IS NULL
-                         AND COALESCE(pm.taken_at, f.mtime) < ?
-                       ORDER BY COALESCE(pm.taken_at, f.mtime) DESC
+                         AND (COALESCE(pm.taken_at, f.mtime), f.id) < (?, ?)
+                       ORDER BY COALESCE(pm.taken_at, f.mtime) DESC, f.id DESC
                        LIMIT 1""",
-                    (sort_key,),
+                    (sort_key, f["id"]),
                 ).fetchone()
                 prev_id = prev_photo["id"] if prev_photo else None
                 next_id = next_photo["id"] if next_photo else None
@@ -1348,7 +1352,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 FROM files f
                 JOIN photo_meta pm ON pm.file_id = f.id
                 WHERE {where}
-                ORDER BY pm.taken_at DESC
+                ORDER BY pm.taken_at DESC, f.id DESC
                 LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()

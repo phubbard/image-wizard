@@ -231,7 +231,7 @@ position you left.
 
 | Page | What it does |
 |------|-------------|
-| **Timeline** (`/`) | Photos by date with year + multi-month subheaders. Videos get a ▶ duration badge; iPhone Live Photos show once with a concentric-circles "LIVE" badge (the .MOV companion is hidden). |
+| **Timeline** (`/`) | Photos by date with year + multi-month subheaders. Videos get a ▶ duration badge; iPhone Live Photos show once with a concentric-circles "LIVE" badge (the .MOV companion is hidden). Ordering is stable by `(taken_at, id)`, so photos that share a date (common on scanned film with date-only timestamps) don't duplicate across infinite-scroll page boundaries or get skipped by prev/next. |
 | **Search** (`/search`) | Free-text CLIP search ("dog on a beach"), plus filter dropdowns for object label, camera, named person, unnamed face cluster, and country. Prev/Next on photo detail walks the search results. |
 | **Photo detail** (`/photo/{id}`) | Full image with toggleable bounding boxes for objects (teal) and faces (yellow). Click a face box to name it inline. Rotate controls (↺ ↻ ⤢) fix images whose EXIF orientation is missing. The Pipeline section in the sidebar shows the four ML stage flags (✓/✗) so you can tell whether missing detections are a pipeline gap or a genuinely empty result. Decode failures are flagged in red with the recorded error. |
 
