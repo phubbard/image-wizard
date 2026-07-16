@@ -138,7 +138,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     def _build_timeline_where(
         year: str, months: list[str], roots: list[str] | None = None
     ) -> tuple[str, list]:
-        where = "f.missing = 0 AND f.live_photo_of IS NULL"
+        where = "f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL"
         params: list = []
         if year:
             where += " AND pm.taken_at LIKE ?"
@@ -292,7 +292,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    FROM faces fa
                    JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                    JOIN files ff ON ff.id = fa.file_id
-                   WHERE fc.person_id = ? AND ff.missing = 0 AND ff.live_photo_of IS NULL
+                   WHERE fc.person_id = ? AND ff.missing = 0 AND ff.live_photo_of IS NULL AND ff.dup_of IS NULL
                ) t
                JOIN files f ON f.id = t.fid
                LEFT JOIN photo_meta pm ON pm.file_id = f.id
@@ -307,7 +307,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                FROM faces fa
                JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                JOIN files f ON f.id = fa.file_id
-               WHERE fc.person_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL""",
+               WHERE fc.person_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL""",
             (person_id,),
         ).fetchone()
         return row[0] if row else 0
@@ -353,7 +353,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                    JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                    JOIN files f ON f.id = fa.file_id
                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE fc.person_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL""",
+                   WHERE fc.person_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL""",
                 (person_id,),
             ).fetchone()
 
@@ -379,7 +379,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                        JOIN face_clusters fc ON fc.cluster_id = fa.cluster_id
                        JOIN files f ON f.id = fa.file_id
                        JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE fc.person_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL
+                       WHERE fc.person_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                          AND pm.taken_at IS NOT NULL
                          AND LENGTH(pm.taken_at) >= 4
                    )
@@ -606,7 +606,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 prev_photo = conn.execute(
                     """SELECT f.id FROM files f
                        LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE f.missing = 0 AND f.live_photo_of IS NULL
+                       WHERE f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                          AND (COALESCE(pm.taken_at, f.mtime), f.id) > (?, ?)
                        ORDER BY COALESCE(pm.taken_at, f.mtime) ASC, f.id ASC
                        LIMIT 1""",
@@ -615,7 +615,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 next_photo = conn.execute(
                     """SELECT f.id FROM files f
                        LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                       WHERE f.missing = 0 AND f.live_photo_of IS NULL
+                       WHERE f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                          AND (COALESCE(pm.taken_at, f.mtime), f.id) < (?, ?)
                        ORDER BY COALESCE(pm.taken_at, f.mtime) DESC, f.id DESC
                        LIMIT 1""",
@@ -634,7 +634,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 tl_month = ta[5:7].lstrip("0") or "0"
                 # Count photos newer than this one under the same filter.
                 sort_key = ta
-                where = ("f.missing = 0 AND f.live_photo_of IS NULL AND pm.taken_at LIKE ? "
+                where = ("f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL AND pm.taken_at LIKE ? "
                          "AND SUBSTR(pm.taken_at, 6, 2) = ?")
                 newer = conn.execute(
                     f"""SELECT COUNT(*) FROM files f
@@ -710,7 +710,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     FROM detections d
                     JOIN files f ON f.id = d.file_id
                     LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                    WHERE d.label = ? AND f.missing = 0 AND f.live_photo_of IS NULL {rfrag}
+                    WHERE d.label = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL {rfrag}
                     ORDER BY pm.taken_at DESC
                     LIMIT ?""",
                 [label] + rparams + [k],
@@ -722,7 +722,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     FROM faces fa
                     JOIN files f ON f.id = fa.file_id
                     LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                    WHERE fa.person_name = ? AND f.missing = 0 AND f.live_photo_of IS NULL {rfrag}
+                    WHERE fa.person_name = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL {rfrag}
                     ORDER BY pm.taken_at DESC
                     LIMIT ?""",
                 [person] + rparams + [k],
@@ -734,7 +734,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     FROM faces fa
                     JOIN files f ON f.id = fa.file_id
                     LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                    WHERE fa.cluster_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL {rfrag}
+                    WHERE fa.cluster_id = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL {rfrag}
                     ORDER BY pm.taken_at DESC
                     LIMIT ?""",
                 [cluster] + rparams + [k],
@@ -745,7 +745,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
-                    WHERE pm.camera_model = ? AND f.missing = 0 AND f.live_photo_of IS NULL {rfrag}
+                    WHERE pm.camera_model = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL {rfrag}
                     ORDER BY pm.taken_at DESC
                     LIMIT ?""",
                 [camera] + rparams + [k],
@@ -756,7 +756,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                            pm.taken_at, pm.camera_model, pm.city, pm.country
                     FROM files f
                     JOIN photo_meta pm ON pm.file_id = f.id
-                    WHERE pm.country = ? AND f.missing = 0 AND f.live_photo_of IS NULL {rfrag}
+                    WHERE pm.country = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL {rfrag}
                     ORDER BY pm.taken_at DESC
                     LIMIT ?""",
                 [country] + rparams + [k],
@@ -1179,7 +1179,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                           MAX(pm.taken_at) AS last_seen
                    FROM photo_meta pm
                    JOIN files f ON f.id = pm.file_id
-                   WHERE pm.camera_model IS NOT NULL AND f.missing = 0 AND f.live_photo_of IS NULL
+                   WHERE pm.camera_model IS NOT NULL AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                    GROUP BY pm.camera_make, pm.camera_model
                    ORDER BY cnt DESC"""
             ).fetchall()
@@ -1222,7 +1222,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             """SELECT pm.lens AS lens, COUNT(*) AS cnt
                FROM photo_meta pm
                JOIN files f ON f.id = pm.file_id
-               WHERE pm.camera_model = ? AND f.missing = 0 AND f.live_photo_of IS NULL
+               WHERE pm.camera_model = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                GROUP BY pm.lens
                ORDER BY cnt DESC""",
             (camera_model,),
@@ -1332,7 +1332,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         per camera mode). Empty-string param means the "(no lens info)"
         pill — matches NULL lens rows.
         """
-        where = "pm.camera_model = ? AND f.missing = 0 AND f.live_photo_of IS NULL"
+        where = "pm.camera_model = ? AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL"
         params: list = [camera_model]
         if lens is not None:
             if lens == "":
@@ -1446,7 +1446,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                JOIN files f ON f.id = pm.file_id
                WHERE pm.lat BETWEEN ? AND ?
                  AND pm.lon BETWEEN ? AND ?
-                 AND f.missing = 0 AND f.live_photo_of IS NULL""",
+                 AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL""",
             (lat_min, lat_max, lon_min, lon_max),
         ).fetchall()
 
@@ -1539,7 +1539,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     FROM photo_meta pm
                     JOIN files f ON f.id = pm.file_id
                     WHERE pm.lat IS NOT NULL AND pm.lon IS NOT NULL
-                      AND f.missing = 0 AND f.live_photo_of IS NULL
+                      AND f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                       {root_frag}""",
                 root_params,
             ).fetchall()
@@ -1565,7 +1565,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         row = conn.execute(
             """SELECT COUNT(*) FROM files f
                LEFT JOIN photo_meta pm ON pm.file_id = f.id
-               WHERE f.missing = 0 AND f.live_photo_of IS NULL
+               WHERE f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                  AND (pm.lat IS NULL)"""
         ).fetchone()
         return row[0] if row else 0
@@ -1670,7 +1670,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
             # Sort key: COALESCE(taken_at,'') DESC, id DESC. "Next" (older)
             # means a strictly smaller (date, id) tuple.
-            where = ["f.missing = 0", "f.live_photo_of IS NULL", "pm.lat IS NULL"]
+            where = ["f.missing = 0", "f.live_photo_of IS NULL AND f.dup_of IS NULL", "pm.lat IS NULL"]
             params: list = []
             if cur_id is not None:
                 where.append(
@@ -1792,7 +1792,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     peers = conn.execute(
                         """SELECT f.id FROM files f
                            LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                           WHERE f.missing = 0 AND f.live_photo_of IS NULL
+                           WHERE f.missing = 0 AND f.live_photo_of IS NULL AND f.dup_of IS NULL
                              AND f.id != ?
                              AND pm.lat IS NULL
                              AND SUBSTR(pm.taken_at, 1, 10) = ?""",

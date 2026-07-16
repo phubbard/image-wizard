@@ -18,6 +18,7 @@ dependencies = [
     # Geo
     "reverse-geocoder>=1.5.1",
     "geonamescache>=2.0",   # forward place search (name → coords, with population)
+    "imagehash>=4.3",       # perceptual hashing for visual duplicate detection
     # Vector store
     "sqlite-vec>=0.1.6",
     # ML (CPU/MPS)

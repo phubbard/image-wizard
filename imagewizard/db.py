@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -320,6 +320,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_live_video_id "
             "ON files(live_video_id)"
+        )
+
+    # phash: perceptual (DCT) hash hex string, for detecting visually
+    # identical but byte-different duplicates (re-encoded / re-imported
+    # copies that content_hash can't catch). Computed lazily by
+    # `find-duplicates --visual`.
+    _add_column(conn, "files", "phash", "phash TEXT")
+    if "phash" in {r[1] for r in conn.execute("PRAGMA table_info(files)")}:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_phash ON files(phash)"
+        )
+
+    # dup_of: on a redundant duplicate, points at the canonical file kept
+    # for that group. Set by `find-duplicates --dedupe-index`. Grids hide
+    # dup_of IS NOT NULL rows. Durable + non-destructive: the file and
+    # row both stay on disk / in the DB, and a rescan leaves the flag
+    # alone (the path is unchanged), so unlike deleting the row it also
+    # survives for *visual* duplicates that hash-dedup can't re-skip.
+    if _add_column(conn, "files", "dup_of", "dup_of INTEGER"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_dup_of ON files(dup_of)"
         )
 
     # rotation: user-applied display rotation in degrees clockwise

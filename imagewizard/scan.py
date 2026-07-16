@@ -277,6 +277,73 @@ def delete_file_row(conn, file_id: int) -> None:
     conn.execute("DELETE FROM files WHERE id=?", (file_id,))
 
 
+def compute_phashes(conn, cache_dir, console=None, workers: int = 4) -> int:
+    """Fill ``files.phash`` for live files that don't have one yet.
+
+    The perceptual (DCT) hash is computed from the file's 512px cached
+    thumbnail — fast, and robust to JPEG recompression, so two
+    byte-different exports of the same photo get the same phash. Cached
+    in the DB so this only pays the cost once. Returns how many were
+    computed.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import imagehash
+    from PIL import Image
+    from .thumbs import thumb_path, ensure_thumbnail
+
+    rows = conn.execute(
+        """SELECT id, content_hash, path FROM files
+           WHERE missing = 0 AND too_small = 0 AND phash IS NULL
+             AND dup_of IS NULL AND content_hash != ''"""
+    ).fetchall()
+    if not rows:
+        return 0
+
+    def one(r):
+        try:
+            tp = thumb_path(cache_dir, r["content_hash"])
+            if not tp.exists():
+                from . import decode
+                src = Path(r["path"])
+                if not src.exists():
+                    return (r["id"], None)
+                if src.suffix.lower() in VIDEO_EXTS:
+                    from .video import extract_poster
+                    arr, _ = extract_poster(src)
+                else:
+                    arr = decode.load_image(src)
+                ensure_thumbnail(arr, cache_dir, r["content_hash"])
+            with Image.open(tp) as im:
+                return (r["id"], str(imagehash.phash(im.convert("RGB"))))
+        except Exception:
+            return (r["id"], None)
+
+    done = 0
+    from rich.progress import Progress, BarColumn, MofNCompleteColumn, SpinnerColumn, TimeRemainingColumn
+    prog = Progress(
+        SpinnerColumn(), BarColumn(), MofNCompleteColumn(), TimeRemainingColumn(),
+        console=console or Console(stderr=True),
+    )
+    with prog, ThreadPoolExecutor(max_workers=workers) as pool:
+        task = prog.add_task("phash", total=len(rows))
+        pending = []
+        futs = {pool.submit(one, r): r for r in rows}
+        for fut in as_completed(futs):
+            fid, ph = fut.result()
+            # Store '' for un-hashable files so we don't retry them forever.
+            pending.append((ph if ph is not None else "", fid))
+            done += 1
+            prog.advance(task)
+            if len(pending) >= 500:
+                conn.executemany("UPDATE files SET phash=? WHERE id=?", pending)
+                conn.commit()
+                pending = []
+        if pending:
+            conn.executemany("UPDATE files SET phash=? WHERE id=?", pending)
+            conn.commit()
+    return done
+
+
 def _walk_one_root(root: Path) -> Iterator[Path]:
     """Yield supported image paths under a single root.
 
@@ -780,6 +847,19 @@ def register(parent: typer.Typer) -> None:
                  "Durable: a later rescan re-skips the kept-on-disk copies "
                  "via hash dedup.",
         ),
+        visual: bool = typer.Option(
+            False, "--visual",
+            help="Group by perceptual (visual) hash instead of exact "
+                 "bytes. Catches re-encoded / re-imported copies that are "
+                 "visually identical but byte-different (so content_hash "
+                 "differs). Computes + caches a phash per photo on first "
+                 "run (slow once, instant after).",
+        ),
+        reset: bool = typer.Option(
+            False, "--reset",
+            help="Un-hide everything previously marked by --dedupe-index "
+                 "(clear all dup_of flags) and exit. Reverses a dedup.",
+        ),
         keep: str = typer.Option(
             "shortest-path", "--keep",
             help="Tie-break for which copy to keep per group: "
@@ -795,17 +875,21 @@ def register(parent: typer.Typer) -> None:
             False, "--verbose", help="Print every group (slow for thousands)."
         ),
     ) -> None:
-        """Find and resolve files with identical SHA-256 content hash.
+        """Find and resolve duplicate photos.
 
-        Exact duplicates are grouped by content_hash. In each group one
-        file is chosen as the keeper; the rest are redundant.
+        Groups either by exact bytes (content_hash, default) or by
+        perceptual hash (--visual — catches re-encoded/re-imported
+        copies that look identical but differ byte-for-byte). One file
+        per group is the keeper; the rest are redundant.
 
         * default — dry run, just report the counts.
-        * --dedupe-index — drop the redundant *index rows*, leaving every
-          file on disk. Fixes duplicate thumbnails in the timeline without
-          touching your originals. Reversible-ish: a rescan won't re-add
-          them (hash dedup), but they're not deleted so nothing is lost.
-        * --delete — also unlink the redundant files from disk.
+        * --dedupe-index — hide the redundant copies from all views by
+          marking them dup_of the keeper. Non-destructive (files + rows
+          stay) and durable: a rescan leaves the flag alone, so it works
+          for visual duplicates too. Reverse with --reset.
+        * --delete — unlink the redundant files from disk and drop their
+          rows (reclaims space; not reversible).
+        * --reset — clear all dup_of flags (un-hide everything).
 
         Keeper selection preserves metadata: a copy with GPS beats one
         without, then a copy with a date, then the --keep tie-break.
@@ -821,13 +905,32 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         console = Console()
         try:
+            if reset:
+                cur = conn.execute(
+                    "UPDATE files SET dup_of=NULL WHERE dup_of IS NOT NULL"
+                )
+                console.print(
+                    f"[green]un-hid {cur.rowcount} duplicate(s)[/green] "
+                    "(all dup_of flags cleared)"
+                )
+                return
+
+            # Grouping key: exact content_hash (default) or perceptual
+            # phash (--visual, for byte-different visual duplicates).
+            key_col = "phash" if visual else "content_hash"
+            if visual:
+                n = compute_phashes(conn, cfg.cache_dir, console)
+                if n:
+                    console.print(f"[dim]computed {n} perceptual hashes[/dim]")
+
             hashes = conn.execute(
-                """SELECT content_hash, COUNT(*) AS cnt
-                   FROM files
-                   WHERE missing = 0 AND too_small = 0 AND content_hash != ''
-                   GROUP BY content_hash
-                   HAVING cnt > 1
-                   ORDER BY cnt DESC"""
+                f"""SELECT {key_col} AS gkey, COUNT(*) AS cnt
+                    FROM files
+                    WHERE missing = 0 AND too_small = 0 AND dup_of IS NULL
+                      AND {key_col} IS NOT NULL AND {key_col} != ''
+                    GROUP BY {key_col}
+                    HAVING cnt > 1
+                    ORDER BY cnt DESC"""
             ).fetchall()
 
             if not hashes:
@@ -885,11 +988,12 @@ def register(parent: typer.Typer) -> None:
                     if track:
                         track()
                     rows = conn.execute(
-                        """SELECT f.id, f.path, f.size, f.mtime,
-                                  pm.lat AS lat, pm.taken_at AS taken_at
-                           FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
-                           WHERE f.content_hash = ? AND f.missing = 0""",
-                        (h["content_hash"],),
+                        f"""SELECT f.id, f.path, f.size, f.mtime,
+                                   pm.lat AS lat, pm.taken_at AS taken_at
+                            FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
+                            WHERE f.{key_col} = ? AND f.missing = 0
+                              AND f.dup_of IS NULL""",
+                        (h["gkey"],),
                     ).fetchall()
                     if len(rows) < 2:
                         continue
@@ -898,7 +1002,7 @@ def register(parent: typer.Typer) -> None:
 
                     if verbose:
                         console.print(
-                            f"\n[bold]{h['content_hash'][:12]}[/bold] "
+                            f"\n[bold]{str(h['gkey'])[:16]}[/bold] "
                             f"({len(rows)} copies)"
                         )
                         console.print(f"  [green]keep[/green] {keeper['path']}")
@@ -914,8 +1018,17 @@ def register(parent: typer.Typer) -> None:
                                 if p.exists():
                                     p.unlink()
                                 freed_bytes += r["size"] or 0
-                            # Both modes drop the index row (+ vec entries).
-                            delete_file_row(conn, r["id"])
+                                delete_file_row(conn, r["id"])
+                            else:
+                                # --dedupe-index: mark as a duplicate of the
+                                # keeper. Non-destructive (row + file stay)
+                                # and durable — rescan leaves dup_of alone,
+                                # so it also works for visual dupes that
+                                # hash-dedup can't re-skip.
+                                conn.execute(
+                                    "UPDATE files SET dup_of=? WHERE id=?",
+                                    (keeper["id"], r["id"]),
+                                )
                             removed += 1
                         except OSError as e:
                             errors += 1
@@ -938,8 +1051,8 @@ def register(parent: typer.Typer) -> None:
                 )
             elif dedupe_index:
                 console.print(
-                    f"\n[green]dropped {removed} redundant index rows[/green] "
-                    f"(files left on disk), errors: {errors}"
+                    f"\n[green]hid {removed} redundant copies[/green] "
+                    f"(files + rows kept, marked dup_of), errors: {errors}"
                 )
             else:
                 console.print(
