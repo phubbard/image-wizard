@@ -73,7 +73,8 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         try:
             return c.execute(
                 "SELECT COUNT(*) FROM files WHERE rotation_suggested IS NOT NULL "
-                "AND rotation = 0 AND missing = 0"
+                "AND rotation = 0 AND missing = 0 AND dup_of IS NULL "
+                "AND live_photo_of IS NULL"
             ).fetchone()[0]
         except sqlite3.OperationalError:
             return 0  # pre-migration DB
@@ -1171,13 +1172,15 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                           rotation_suggested_conf
                    FROM files
                    WHERE rotation_suggested IS NOT NULL AND rotation = 0
-                     AND missing = 0
+                     AND missing = 0 AND dup_of IS NULL
+                     AND live_photo_of IS NULL
                    ORDER BY rotation_suggested_conf DESC
                    LIMIT 200"""
             ).fetchall()
             total = conn.execute(
                 "SELECT COUNT(*) FROM files WHERE rotation_suggested IS NOT NULL "
-                "AND rotation = 0 AND missing = 0"
+                "AND rotation = 0 AND missing = 0 AND dup_of IS NULL "
+                "AND live_photo_of IS NULL"
             ).fetchone()[0]
             return TEMPLATES.TemplateResponse(request, "rotations.html", {
                 "photos": rows, "total": total,

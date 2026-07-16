@@ -132,7 +132,8 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         try:
             where = ["f.missing = 0", "f.kind = 'image'", "f.rotation = 0",
-                     "f.content_hash != ''"]
+                     "f.content_hash != ''", "f.dup_of IS NULL",
+                     "f.live_photo_of IS NULL"]
             params: list = []
             if not redo:
                 where.append("f.rotation_checked = 0")
