@@ -2562,6 +2562,11 @@ def register(parent: typer.Typer) -> None:
         examples: int = typer.Option(
             0, "--examples", "-e",
             help="Print up to N example photos unique to each side."),
+        exclude: str = typer.Option(
+            "", "--exclude",
+            help="Drop paths containing this substring from both sides "
+                 "before comparing, e.g. 'Previews' to skip Apple Photos "
+                 "preview derivatives inside a .photoslibrary package."),
     ) -> None:
         """Compare two scan trees: counts, overlap, and a superset verdict.
 
@@ -2576,12 +2581,14 @@ def register(parent: typer.Typer) -> None:
         console = Console()
         try:
             def load(prefix: str):
-                return conn.execute(
-                    """SELECT f.id, f.path, f.phash, pm.taken_at
-                       FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
-                       WHERE f.missing=0 AND f.kind='image' AND f.path LIKE ?""",
-                    (f"%{prefix}%",),
-                ).fetchall()
+                sql = ("""SELECT f.id, f.path, f.phash, pm.taken_at
+                          FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
+                          WHERE f.missing=0 AND f.kind='image' AND f.path LIKE ?""")
+                params = [f"%{prefix}%"]
+                if exclude:
+                    sql += " AND f.path NOT LIKE ?"
+                    params.append(f"%{exclude}%")
+                return conn.execute(sql, params).fetchall()
 
             def keyf(r):
                 if key == "phash":

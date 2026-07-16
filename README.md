@@ -222,6 +222,8 @@ grouping can't merge.
 # copies have different bytes and content_hash won't match across them.
 image-wizard compare-roots "Photos export" "photoslibrary"
 image-wizard compare-roots "Photos export" "photoslibrary" --examples 5
+# Skip Apple Photos preview derivatives so only real originals are compared:
+image-wizard compare-roots "Photos export" "photoslibrary" --exclude Previews
 ```
 
 Verdict is one of: `A ⊆ B` / `B ⊆ A` (one is a clean superset — drop the
