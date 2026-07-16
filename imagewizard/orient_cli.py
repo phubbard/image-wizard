@@ -72,15 +72,50 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         console = Console()
         try:
+            # Stratify the training sample across years so old eras (whose
+            # cameras are exactly the ones that wrote no EXIF orientation)
+            # aren't drowned out by the modern bulk — a purely random sample
+            # of a mostly-recent library barely sees 2000-era content, so the
+            # model never learns to orient it. Cap per year, oversample for
+            # missing thumbnails, then shuffle to interleave eras.
+            import random
+            n_years = conn.execute(
+                """SELECT COUNT(DISTINCT SUBSTR(pm.taken_at, 1, 4))
+                   FROM files f JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE f.missing = 0 AND f.kind = 'image' AND f.rotation = 0
+                     AND f.content_hash != '' AND pm.taken_at IS NOT NULL
+                     AND LENGTH(pm.taken_at) >= 4"""
+            ).fetchone()[0] or 1
+            per_year = max(100, (samples * 2) // n_years)
             rows = conn.execute(
-                """SELECT content_hash FROM files
-                   WHERE missing = 0 AND kind = 'image' AND rotation = 0
-                     AND content_hash != ''
-                   ORDER BY RANDOM() LIMIT ?""",
-                (samples * 2,),   # oversample; some thumbnails may be absent
+                f"""WITH c AS (
+                       SELECT f.content_hash,
+                              ROW_NUMBER() OVER (
+                                PARTITION BY SUBSTR(pm.taken_at, 1, 4)
+                                ORDER BY RANDOM()) AS rn
+                       FROM files f JOIN photo_meta pm ON pm.file_id = f.id
+                       WHERE f.missing = 0 AND f.kind = 'image' AND f.rotation = 0
+                         AND f.content_hash != '' AND pm.taken_at IS NOT NULL
+                         AND LENGTH(pm.taken_at) >= 4)
+                    SELECT content_hash FROM c WHERE rn <= {per_year}""",
             ).fetchall()
-            console.print(f"[dim]loading up to {samples} thumbnails…[/dim]")
-            imgs, _ = _load_many(cfg.cache_dir, [r["content_hash"] for r in rows])
+            hashes = [r["content_hash"] for r in rows]
+            if len(hashes) < samples:
+                # Sparse / mostly-undated library — top up with a plain
+                # random draw (includes photos with no capture date).
+                seen = set(hashes)
+                extra = conn.execute(
+                    """SELECT content_hash FROM files
+                       WHERE missing = 0 AND kind = 'image' AND rotation = 0
+                         AND content_hash != '' ORDER BY RANDOM() LIMIT ?""",
+                    (samples * 2,),
+                ).fetchall()
+                hashes += [r["content_hash"] for r in extra
+                           if r["content_hash"] not in seen]
+            random.shuffle(hashes)
+            console.print(f"[dim]{n_years} years, ≤{per_year}/year; "
+                          f"loading up to {samples} thumbnails…[/dim]")
+            imgs, _ = _load_many(cfg.cache_dir, hashes)
             imgs = imgs[:samples]
             if len(imgs) < 200:
                 console.print(

@@ -2432,6 +2432,29 @@ def register(parent: typer.Typer) -> None:
                 f"on disk: {Path(row['path']).exists()}"
             )
 
+            # ---- Orientation ------------------------------------------
+            # What did the rotation model decide for this photo? Explains
+            # why an obviously-sideways photo did (or didn't) surface at
+            # /rotations: not-scanned vs called-upright vs suggested-but-
+            # below-threshold (the conf is shown so you can judge).
+            try:
+                console.print("\n[bold]Orientation[/bold]")
+                console.print(f"  applied rotation: {row['rotation']}°")
+                if not row["rotation_checked"]:
+                    console.print("  [yellow]not checked[/yellow] by the "
+                                  "orientation model yet (run suggest-rotations)")
+                elif row["rotation_suggested"] is not None:
+                    conf = row["rotation_suggested_conf"]
+                    console.print(
+                        f"  [cyan]suggested {row['rotation_suggested']}° CW[/cyan]"
+                        f"{f' (conf {conf*100:.0f}%)' if conf is not None else ''}"
+                        " — pending at /rotations")
+                else:
+                    console.print("  checked → [dim]no suggestion[/dim] (model "
+                                  "read it as upright, or below --min-conf)")
+            except (IndexError, KeyError):
+                pass  # pre-migration DB
+
             # ---- Duplicate status -------------------------------------
             # Why is this photo showing (or not) as a duplicate? Surface
             # the byte hash, the perceptual hash, the durable dup_of flag,
