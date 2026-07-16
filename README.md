@@ -210,7 +210,11 @@ image-wizard drop-videos                      # remove .mov/.mp4 rows
 image-wizard fix-orientations                 # reset ML flags for files whose
                                               # stored dims don't match rotated image
 image-wizard find-duplicates                  # list files sharing a content_hash
-image-wizard find-duplicates --delete         # also remove redundant copies
+image-wizard find-duplicates --dedupe-index   # collapse dup groups to one index
+                                              # entry, KEEP files on disk. Fixes
+                                              # "timeline shows the same photo
+                                              # twice" non-destructively.
+image-wizard find-duplicates --delete         # also unlink redundant files
 
 # Files that failed to decode are tombstoned so subsequent index runs skip
 # them. Inspect / retry:

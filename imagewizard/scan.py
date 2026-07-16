@@ -770,37 +770,57 @@ def register(parent: typer.Typer) -> None:
     def cmd_find_duplicates(
         delete: bool = typer.Option(
             False, "--delete",
-            help="Actually delete redundant files. Default is dry-run.",
+            help="Delete redundant files from disk AND drop their index rows.",
+        ),
+        dedupe_index: bool = typer.Option(
+            False, "--dedupe-index",
+            help="Drop redundant index rows but KEEP the files on disk. "
+                 "Non-destructive fix for 'timeline shows the same photo "
+                 "twice' — collapses each duplicate group to one entry. "
+                 "Durable: a later rescan re-skips the kept-on-disk copies "
+                 "via hash dedup.",
         ),
         keep: str = typer.Option(
             "shortest-path", "--keep",
-            help="Which copy to keep per duplicate group: "
-                 "shortest-path | longest-path | oldest | newest.",
+            help="Tie-break for which copy to keep per group: "
+                 "shortest-path | longest-path | oldest | newest. "
+                 "(A copy carrying GPS or a date always wins over one "
+                 "without, regardless of this.)",
         ),
         limit: int = typer.Option(
             0, "--limit",
             help="Stop after processing this many duplicate groups (0 = all).",
         ),
+        verbose: bool = typer.Option(
+            False, "--verbose", help="Print every group (slow for thousands)."
+        ),
     ) -> None:
-        """Find files with identical SHA-256 content hash and (optionally) delete redundant copies.
+        """Find and resolve files with identical SHA-256 content hash.
 
-        Exact duplicates are grouped by content_hash. In each group one file
-        is chosen as the keeper (by --keep rule); the rest are reported.
-        With --delete, the redundant files are unlinked from disk and their
-        rows removed from the DB. Missing/tombstoned rows are ignored.
+        Exact duplicates are grouped by content_hash. In each group one
+        file is chosen as the keeper; the rest are redundant.
+
+        * default — dry run, just report the counts.
+        * --dedupe-index — drop the redundant *index rows*, leaving every
+          file on disk. Fixes duplicate thumbnails in the timeline without
+          touching your originals. Reversible-ish: a rescan won't re-add
+          them (hash dedup), but they're not deleted so nothing is lost.
+        * --delete — also unlink the redundant files from disk.
+
+        Keeper selection preserves metadata: a copy with GPS beats one
+        without, then a copy with a date, then the --keep tie-break.
         """
         if keep not in ("shortest-path", "longest-path", "oldest", "newest"):
             raise typer.BadParameter(
                 "--keep must be one of: shortest-path, longest-path, oldest, newest"
             )
+        if delete and dedupe_index:
+            raise typer.BadParameter("pass only one of --delete / --dedupe-index")
 
         cfg = config.load()
         conn = db.connect(cfg.db_path)
         console = Console()
         try:
-            # Find content_hashes that appear more than once on live (missing=0)
-            # rows. Exclude too_small tombstones (they all carry an empty hash
-            # by convention so they'd otherwise group together as "duplicates").
             hashes = conn.execute(
                 """SELECT content_hash, COUNT(*) AS cnt
                    FROM files
@@ -820,71 +840,110 @@ def register(parent: typer.Typer) -> None:
                 f"[yellow]{total_groups} duplicate groups[/yellow] "
                 f"covering {total_dup_files} redundant files"
             )
-            if not delete:
-                console.print("[dim]dry run — pass --delete to actually remove[/dim]")
+            if not delete and not dedupe_index:
+                console.print(
+                    "[dim]dry run — pass --dedupe-index (keep files) or "
+                    "--delete (remove files)[/dim]"
+                )
 
-            def _picker(rows):
+            def _tiebreak(rows):
                 if keep == "shortest-path":
                     return min(rows, key=lambda r: (len(r["path"]), r["path"]))
                 if keep == "longest-path":
                     return max(rows, key=lambda r: (len(r["path"]), r["path"]))
                 if keep == "oldest":
                     return min(rows, key=lambda r: r["mtime"])
-                return max(rows, key=lambda r: r["mtime"])  # newest
+                return max(rows, key=lambda r: r["mtime"])
+
+            def _picker(rows):
+                # Preserve metadata: prefer copies with GPS, then with a
+                # date, then apply the tie-break rule within the best tier.
+                with_gps = [r for r in rows if r["lat"] is not None]
+                if with_gps:
+                    return _tiebreak(with_gps)
+                with_date = [r for r in rows if r["taken_at"]]
+                if with_date:
+                    return _tiebreak(with_date)
+                return _tiebreak(rows)
 
             removed = 0
             freed_bytes = 0
             errors = 0
+            acting = delete or dedupe_index
 
-            for i, h in enumerate(hashes):
-                if limit and i >= limit:
-                    break
-                rows = conn.execute(
-                    """SELECT id, path, size, mtime
-                       FROM files
-                       WHERE content_hash = ? AND missing = 0""",
-                    (h["content_hash"],),
-                ).fetchall()
-                if len(rows) < 2:
-                    continue
+            from rich.progress import Progress, BarColumn, MofNCompleteColumn, SpinnerColumn
+            prog_ctx = Progress(
+                SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                console=Console(stderr=True),
+            ) if (acting and not verbose) else None
 
-                keeper = _picker(rows)
-                losers = [r for r in rows if r["id"] != keeper["id"]]
+            def _run(track=None):
+                nonlocal removed, freed_bytes, errors
+                for i, h in enumerate(hashes):
+                    if limit and i >= limit:
+                        break
+                    if track:
+                        track()
+                    rows = conn.execute(
+                        """SELECT f.id, f.path, f.size, f.mtime,
+                                  pm.lat AS lat, pm.taken_at AS taken_at
+                           FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
+                           WHERE f.content_hash = ? AND f.missing = 0""",
+                        (h["content_hash"],),
+                    ).fetchall()
+                    if len(rows) < 2:
+                        continue
+                    keeper = _picker(rows)
+                    losers = [r for r in rows if r["id"] != keeper["id"]]
 
-                console.print(
-                    f"\n[bold]{h['content_hash'][:12]}[/bold] "
-                    f"({len(rows)} copies)"
-                )
-                console.print(f"  [green]keep[/green] {keeper['path']}")
-                for r in losers:
-                    console.print(f"  [red]dup [/red] {r['path']}")
+                    if verbose:
+                        console.print(
+                            f"\n[bold]{h['content_hash'][:12]}[/bold] "
+                            f"({len(rows)} copies)"
+                        )
+                        console.print(f"  [green]keep[/green] {keeper['path']}")
+                        for r in losers:
+                            console.print(f"  [red]dup [/red] {r['path']}")
 
-                if delete:
+                    if not acting:
+                        continue
                     for r in losers:
                         try:
-                            p = Path(r["path"])
-                            if p.exists():
-                                p.unlink()
-                            # CASCADE cleans detections / faces, but not the
-                            # sqlite-vec virtual tables — delete_file_row
-                            # handles those manually.
+                            if delete:
+                                p = Path(r["path"])
+                                if p.exists():
+                                    p.unlink()
+                                freed_bytes += r["size"] or 0
+                            # Both modes drop the index row (+ vec entries).
                             delete_file_row(conn, r["id"])
                             removed += 1
-                            freed_bytes += r["size"] or 0
                         except OSError as e:
                             errors += 1
                             console.print(f"    [red]error:[/red] {e}")
                     conn.commit()
 
+            if prog_ctx:
+                with prog_ctx as prog:
+                    task = prog.add_task("dedup", total=min(
+                        total_groups, limit or total_groups))
+                    _run(track=lambda: prog.advance(task))
+            else:
+                _run()
+
             if delete:
                 mb = freed_bytes / (1024 * 1024)
                 console.print(
-                    f"\n[green]removed {removed} files[/green] "
+                    f"\n[green]removed {removed} files from disk[/green] "
                     f"(~{mb:.1f} MB), errors: {errors}"
+                )
+            elif dedupe_index:
+                console.print(
+                    f"\n[green]dropped {removed} redundant index rows[/green] "
+                    f"(files left on disk), errors: {errors}"
                 )
             else:
                 console.print(
-                    f"\n[dim]would remove {total_dup_files} files[/dim]"
+                    f"\n[dim]would resolve {total_dup_files} redundant files[/dim]"
                 )
         finally:
             conn.close()
