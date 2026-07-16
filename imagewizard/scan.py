@@ -1768,6 +1768,12 @@ def register(parent: typer.Typer) -> None:
             dd_args = ["find-duplicates", "--visual", "--dedupe-index"]
             phases.append(("find-duplicates", dd_args,
                            phase("find-duplicates", dd_args)))
+            # Near-duplicate pass: same filename + phash within a few bits,
+            # for copies re-encoded across export trees whose phashes drifted
+            # (exact --visual can't catch those). Cheap — reuses phashes.
+            nd_args = ["find-duplicates", "--near", "12", "--dedupe-index"]
+            phases.append(("find-duplicates-near", nd_args,
+                           phase("find-duplicates-near", nd_args)))
 
         phases.append(("cluster-faces", ["cluster-faces"],
                        phase("cluster-faces", ["cluster-faces"])))
