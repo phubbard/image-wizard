@@ -188,11 +188,22 @@ if (BATCH) {
     };
 
     async function fetchBatch() {
-        const params = new URLSearchParams({ limit: '50' });
-        if (batchPhoto != null) { params.set('photo', String(batchPhoto)); batchPhoto = null; }
-        else if (cursor) { params.set('after_date', cursor.date); params.set('after_id', String(cursor.id)); }
-        const r = await fetch('/geotag/queue.json?' + params.toString());
-        const data = await r.json();
+        const doFetch = async () => {
+            const params = new URLSearchParams({ limit: '50' });
+            if (batchPhoto != null) { params.set('photo', String(batchPhoto)); batchPhoto = null; }
+            else if (cursor) { params.set('after_date', cursor.date); params.set('after_id', String(cursor.id)); }
+            const r = await fetch('/geotag/queue.json?' + params.toString());
+            return r.json();
+        };
+        let data = await doFetch();
+        // Wrap-around: if the cursor walked off the oldest end but
+        // untagged photos still remain (we entered mid-timeline via
+        // "Add location" and skipped everything newer), restart from the
+        // newest so nothing is left behind.
+        if (data.items.length === 0 && data.remaining > 0 && cursor) {
+            cursor = null;
+            data = await doFetch();
+        }
         queue = data.items;
         cursor = data.next_cursor;
         els.remaining.textContent = data.remaining + ' photos without a location';
@@ -240,8 +251,25 @@ if (BATCH) {
             let msg = 'Saved: ' + (place || 'coordinates');
             if (res.also_tagged) msg += ` (+${res.also_tagged} same-day)`;
             els.status.innerHTML = '<span class="ok">✓ ' + msg + '</span>';
-            if (res.also_tagged) { cursor = null; queue = []; batchPhoto = null; await fetchBatch(); showCurrent(); }
-            else { setTimeout(advance, 200); }
+            if (res.also_tagged) {
+                // Same-day tagging may have tagged peers sitting in our
+                // look-ahead queue. Discard the stale buffer and refetch
+                // — but anchor the cursor to the photo we just tagged so
+                // we continue from THIS point in the timeline, not from
+                // the newest photo again.
+                cursor = { date: item.taken_at || '', id: item.id };
+                queue = [];
+                batchPhoto = null;
+                await fetchBatch();
+                if (queue.length === 0) {
+                    els.panel.style.display = 'none';
+                    els.done.style.display = 'block';
+                } else {
+                    showCurrent();
+                }
+            } else {
+                setTimeout(advance, 200);
+            }
         } catch (err) {
             els.status.textContent = 'Save failed — try again.';
             els.save.disabled = false;
