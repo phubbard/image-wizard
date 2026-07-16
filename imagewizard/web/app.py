@@ -1566,42 +1566,90 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         ).fetchone()
         return row[0] if row else 0
 
+    @app.get("/geocode")
+    async def geocode_search(q: str = Query("", description="Place name")):
+        """Forward-geocode a place name to candidate coordinates (offline).
+
+        Powers the search box on the geotag screen: "paris france" →
+        [{name, region, country, lat, lon}], population-ranked.
+        """
+        from .. import geo
+        hits = geo.search_places(q, limit=8)
+        return [
+            {"name": h.name, "region": h.region, "country": h.country,
+             "lat": h.lat, "lon": h.lon}
+            for h in hits
+        ]
+
     @app.get("/geotag", response_class=HTMLResponse)
-    async def geotag_page(request: Request, photo: int | None = Query(None)):
-        """Location-tagging workflow. If ?photo=ID is given, that photo
-        is the starting item (used by the 'Add location' link on the
-        photo detail page); otherwise start at the first untagged one."""
+    async def geotag_page(request: Request, photo: int | None = Query(None),
+                          ids: str = Query("")):
+        """Location-tagging workflow.
+
+        Three entry modes:
+        * default — walk the untagged photos in timeline order.
+        * ?photo=ID — start on that photo (photo-detail "Add location").
+        * ?ids=1,2,3 — batch mode: tag exactly this selected set with one
+          map click (timeline multi-select).
+        """
         conn = get_conn()
         try:
-            n_untagged = _count_untagged(conn)
+            id_list: list[int] = []
+            for tok in ids.split(","):
+                tok = tok.strip()
+                if tok.isdigit():
+                    id_list.append(int(tok))
+            batch = []
+            if id_list:
+                rows = conn.execute(
+                    f"""SELECT f.id, f.content_hash, pm.taken_at
+                        FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
+                        WHERE f.id IN ({','.join('?' * len(id_list))})""",
+                    id_list,
+                ).fetchall()
+                batch = [
+                    {"id": r["id"], "hash": r["content_hash"],
+                     "taken_at": r["taken_at"]}
+                    for r in rows
+                ]
             return TEMPLATES.TemplateResponse(request, "geotag.html", {
-                "n_untagged": n_untagged,
+                "n_untagged": _count_untagged(conn),
                 "start_photo": photo,
+                "batch": batch,
             })
         finally:
             conn.close()
 
     @app.get("/geotag/queue.json")
     async def geotag_queue(
-        offset: int = Query(0, ge=0),
         limit: int = Query(50, ge=1, le=200),
         photo: int | None = Query(None),
+        after_date: str = Query(""),
+        after_id: int | None = Query(None),
     ):
-        """Batch of untagged photos for the client to work through.
+        """Cursor-paginated batch of untagged photos, newest-first
+        (matching the timeline).
 
-        If ``photo`` is given it's returned first (so the detail-page
-        'Add location' link lands on that specific photo), followed by
-        the normal untagged queue.
+        Cursor is (after_date, after_id) — the sort key of the last
+        photo the client has already seen. Cursor-based (not offset)
+        so tagging photos mid-walk doesn't shift the pagination and
+        skip photos. Walks continuously down the timeline.
+
+        ?photo=ID (first call only) pins that photo to the front and
+        anchors the cursor to its position, so 'Add location' from a
+        2015 photo continues through 2015's untagged neighbours rather
+        than jumping to the global newest.
         """
         conn = get_conn()
         try:
             items: list[dict] = []
             seen: set[int] = set()
-            if photo is not None and offset == 0:
+            cur_date, cur_id = after_date, after_id
+
+            if photo is not None and not after_date and after_id is None:
                 r = conn.execute(
                     """SELECT f.id, f.content_hash, pm.taken_at, f.path
-                       FROM files f
-                       LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                       FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
                        WHERE f.id = ?""",
                     (photo,),
                 ).fetchone()
@@ -1611,15 +1659,28 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                         "taken_at": r["taken_at"], "path": r["path"],
                     })
                     seen.add(r["id"])
+                    # Anchor the cursor to this photo so the rest of the
+                    # walk continues from its timeline position (older).
+                    cur_date = r["taken_at"] or ""
+                    cur_id = r["id"]
+
+            # Sort key: COALESCE(taken_at,'') DESC, id DESC. "Next" (older)
+            # means a strictly smaller (date, id) tuple.
+            where = ["f.missing = 0", "f.live_photo_of IS NULL", "pm.lat IS NULL"]
+            params: list = []
+            if cur_id is not None:
+                where.append(
+                    "(COALESCE(pm.taken_at,'') < ? "
+                    "OR (COALESCE(pm.taken_at,'') = ? AND f.id < ?))"
+                )
+                params += [cur_date or "", cur_date or "", cur_id]
             rows = conn.execute(
-                """SELECT f.id, f.content_hash, pm.taken_at, f.path
-                   FROM files f
-                   LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE f.missing = 0 AND f.live_photo_of IS NULL
-                     AND (pm.lat IS NULL)
-                   ORDER BY (pm.taken_at IS NULL), pm.taken_at DESC, f.id
-                   LIMIT ? OFFSET ?""",
-                (limit, offset),
+                f"""SELECT f.id, f.content_hash, pm.taken_at, f.path
+                    FROM files f LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {' AND '.join(where)}
+                    ORDER BY COALESCE(pm.taken_at,'') DESC, f.id DESC
+                    LIMIT ?""",
+                params + [limit],
             ).fetchall()
             for r in rows:
                 if r["id"] in seen:
@@ -1628,7 +1689,46 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     "id": r["id"], "hash": r["content_hash"],
                     "taken_at": r["taken_at"], "path": r["path"],
                 })
-            return {"items": items, "remaining": _count_untagged(conn)}
+            # The next cursor is the sort key of the last item returned.
+            next_cursor = None
+            if items:
+                last = items[-1]
+                next_cursor = {"date": last["taken_at"] or "", "id": last["id"]}
+            return {
+                "items": items,
+                "remaining": _count_untagged(conn),
+                "next_cursor": next_cursor,
+            }
+        finally:
+            conn.close()
+
+    @app.post("/geotag/batch")
+    async def geotag_batch(request: Request):
+        """Tag a specific set of photos (timeline multi-select) with one
+        location. Body: ids (comma-separated), lat, lon."""
+        from .. import geo
+        form = await request.form()
+        try:
+            lat = float(form.get("lat"))
+            lon = float(form.get("lon"))
+        except (TypeError, ValueError):
+            return HTMLResponse("lat/lon required", 400)
+        raw = form.get("ids", "")
+        id_list = [int(t) for t in raw.split(",") if t.strip().isdigit()]
+        if not id_list:
+            return HTMLResponse("no ids", 400)
+        conn = get_conn()
+        try:
+            place = geo.reverse_geocode(lat, lon)
+            city = place.city if place else None
+            region = place.region if place else None
+            country = place.country if place else None
+            for fid in id_list:
+                _upsert_location(conn, fid, lat, lon, city, region, country)
+            return {
+                "city": city, "region": region, "country": country,
+                "tagged": len(id_list),
+            }
         finally:
             conn.close()
 
