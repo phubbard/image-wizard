@@ -2399,6 +2399,79 @@ def register(parent: typer.Typer) -> None:
                 f"on disk: {Path(row['path']).exists()}"
             )
 
+            # ---- Duplicate status -------------------------------------
+            # Why is this photo showing (or not) as a duplicate? Surface
+            # the byte hash, the perceptual hash, the durable dup_of flag,
+            # and any siblings — exact-byte, exact-phash, and phash-near
+            # (Hamming ≤ 8, which exact grouping in `find-duplicates`
+            # misses). A sibling tagged VISIBLE is a live duplicate.
+            try:
+                phash = row["phash"]
+                dup_of = row["dup_of"]
+            except (IndexError, KeyError):
+                phash = dup_of = None
+            console.print("\n[bold]Duplicate status[/bold]")
+            console.print(f"  phash: {phash or '—'}")
+            if dup_of:
+                dp = conn.execute(
+                    "SELECT path FROM files WHERE id=?", (dup_of,)
+                ).fetchone()
+                console.print(
+                    f"  [yellow]hidden as dup_of #{dup_of}[/yellow]  "
+                    f"{dp['path'] if dp else '(keeper missing)'}"
+                )
+            else:
+                console.print("  dup_of: — (visible in the timeline)")
+
+            def _tag(r):
+                return (f" dup_of#{r['dup_of']}" if r["dup_of"]
+                        else " [red]VISIBLE[/red]")
+
+            same_bytes = conn.execute(
+                """SELECT id, path, dup_of FROM files
+                   WHERE content_hash=? AND id!=? AND missing=0""",
+                (row["content_hash"], fid),
+            ).fetchall()
+            if same_bytes:
+                console.print(
+                    f"  [cyan]{len(same_bytes)} byte-identical sibling(s)[/cyan] "
+                    "(same content_hash — default `find-duplicates` catches these):"
+                )
+                for s in same_bytes[:8]:
+                    console.print(f"    #{s['id']}{_tag(s)}  {s['path']}")
+
+            if phash:
+                try:
+                    target = int(phash, 16)
+                    others = conn.execute(
+                        """SELECT id, path, phash, dup_of FROM files
+                           WHERE phash IS NOT NULL AND phash!='' AND id!=?
+                             AND missing=0""",
+                        (fid,),
+                    ).fetchall()
+                    near = []
+                    for r2 in others:
+                        try:
+                            d = bin(target ^ int(r2["phash"], 16)).count("1")
+                        except ValueError:
+                            continue
+                        if d <= 8:
+                            near.append((d, r2))
+                    near.sort(key=lambda t: t[0])
+                    if near:
+                        console.print(
+                            f"  [cyan]{len(near)} visually-near sibling(s)[/cyan] "
+                            "(phash Hamming ≤ 8; dist 0 = `--visual` catches it, "
+                            "dist > 0 needs near-dup matching):"
+                        )
+                        for d, r2 in near[:8]:
+                            kind = "exact" if d == 0 else f"dist {d}"
+                            console.print(
+                                f"    #{r2['id']} ({kind}){_tag(r2)}  {r2['path']}"
+                            )
+                except ValueError:
+                    pass
+
             console.print("\n[bold]Pipeline stage flags[/bold]")
             for stage in ("meta_done", "yolo_done", "faces_done", "clip_done"):
                 mark = "[green]✓[/green]" if row[stage] else "[red]✗[/red]"

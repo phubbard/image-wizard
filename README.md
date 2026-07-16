@@ -206,6 +206,15 @@ image-wizard diagnose /Users/pfh/Photos/IMG_0036.JPG
 image-wizard diagnose c873bad96d2e3eab...
 ```
 
+The **Duplicate status** section of `diagnose` explains why a photo is (or
+isn't) hidden as a duplicate: its `phash`, its `dup_of` flag, and any
+siblings — byte-identical (same `content_hash`), exact-phash, and
+phash-*near* (Hamming ≤ 8, which the exact grouping in `find-duplicates`
+does not catch). A sibling printed as `VISIBLE` is a live duplicate; if
+you see byte-identical VISIBLE siblings, `find-duplicates` just needs a
+re-run, whereas `dist > 0` siblings are near-duplicates that exact
+grouping can't merge.
+
 ### Maintenance & repair
 
 ```bash
