@@ -225,6 +225,14 @@ image-wizard find-duplicates --visual --dedupe-index
 image-wizard find-duplicates --reset          # un-hide everything (clear dup_of)
 image-wizard find-duplicates --delete         # unlink redundant files from disk
 
+# Proactively find files that can't be decoded (truncated JPEGs, corrupt
+# .MOV with no moov atom, unsupported RAW) and tombstone them in one pass,
+# instead of waiting for `index` to hit them. Native decoder noise is
+# suppressed. Scope with --videos-only / --images-only / --path.
+image-wizard check-readable --dry-run          # report broken files only
+image-wizard check-readable                    # tombstone them (decode_failed=1)
+image-wizard check-readable --videos-only --path '%/AAA-CLEANMEUP/%'
+
 # Files that failed to decode are tombstoned so subsequent index runs skip
 # them. Inspect / retry:
 image-wizard list-failures                    # paths + recorded errors

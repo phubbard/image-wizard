@@ -1850,6 +1850,160 @@ def register(parent: typer.Typer) -> None:
         finally:
             conn.close()
 
+    @parent.command(name="check-readable")
+    def cmd_check_readable(
+        videos_only: bool = typer.Option(
+            False, "--videos-only", help="Only check video files."
+        ),
+        images_only: bool = typer.Option(
+            False, "--images-only", help="Only check image files."
+        ),
+        path_glob: str = typer.Option(
+            "", "--path",
+            help="Only check files whose path matches this LIKE pattern "
+                 "(e.g. '%/AAA-CLEANMEUP/%').",
+        ),
+        workers: int = typer.Option(
+            8, "--workers", "-w", help="Parallel decode threads."
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run",
+            help="Report broken files without tombstoning them.",
+        ),
+        limit: int = typer.Option(
+            0, "--limit", help="Stop after checking this many files (0 = all)."
+        ),
+    ) -> None:
+        """Find files that can't be decoded and tombstone them.
+
+        Attempts to decode every live, not-already-failed file (an image
+        via the normal decode path, a video via its poster-frame
+        extractor). Anything that throws — truncated JPEGs, corrupt
+        ``.MOV`` files with no moov atom, unsupported RAW variants — is
+        marked ``decode_failed=1`` so the index pipeline and the
+        duplicate scanner skip it instead of erroring on it every run.
+
+        Reverse with ``clear-failures``. Native decoder noise (ffmpeg /
+        libheif chatter) is suppressed so only the summary prints.
+
+        Scope it with ``--videos-only`` / ``--images-only`` / ``--path``
+        to check just a suspect subset quickly, rather than re-decoding
+        the whole library.
+        """
+        import contextlib
+        import sys as _sys
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            where = ["missing=0", "decode_failed=0", "too_small=0",
+                     "content_hash != ''"]
+            params: list = []
+            if videos_only:
+                where.append("kind='video'")
+            if images_only:
+                where.append("COALESCE(kind,'image')!='video'")
+            if path_glob:
+                where.append("path LIKE ?")
+                params.append(path_glob)
+            rows = conn.execute(
+                f"SELECT id, path FROM files WHERE {' AND '.join(where)}",
+                params,
+            ).fetchall()
+            if limit:
+                rows = rows[:limit]
+            if not rows:
+                console.print("[green]nothing to check[/green]")
+                return
+            console.print(f"[dim]checking {len(rows)} file(s)…[/dim]")
+
+            def check_one(r):
+                p = Path(r["path"])
+                if not p.exists():
+                    return (r["id"], "missing", "file not on disk")
+                try:
+                    if p.suffix.lower() in VIDEO_EXTS:
+                        from .video import extract_poster
+                        extract_poster(p)
+                    else:
+                        from .decode import load_image
+                        load_image(p)
+                    return (r["id"], "ok", None)
+                except Exception as e:
+                    return (r["id"], "fail", str(e).replace("\n", " ")[:300])
+
+            # Redirect the process's stderr fd to /dev/null for the whole
+            # batch so native ffmpeg / libheif / OpenCV chatter (which
+            # writes straight to fd 2, bypassing Python) doesn't flood the
+            # terminal. The progress bar goes to stdout so it stays
+            # visible. Exceptions are still captured in Python, so we
+            # keep the real failure reason.
+            @contextlib.contextmanager
+            def _quiet_native_stderr():
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                saved = os.dup(2)
+                _sys.stderr.flush()
+                os.dup2(devnull, 2)
+                try:
+                    yield
+                finally:
+                    _sys.stderr.flush()
+                    os.dup2(saved, 2)
+                    os.close(devnull)
+                    os.close(saved)
+
+            broken: list[tuple[int, str, str]] = []
+            missing: list[int] = []
+            from rich.progress import (
+                Progress, BarColumn, MofNCompleteColumn, SpinnerColumn,
+                TimeRemainingColumn,
+            )
+            with _quiet_native_stderr(), \
+                    ThreadPoolExecutor(max_workers=workers) as pool, \
+                    Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                             TimeRemainingColumn(), console=Console()) as prog:
+                task = prog.add_task("checking", total=len(rows))
+                futs = {pool.submit(check_one, r): r for r in rows}
+                for fut in as_completed(futs):
+                    fid, status, reason = fut.result()
+                    if status == "fail":
+                        broken.append((fid, futs[fut]["path"], reason))
+                    elif status == "missing":
+                        missing.append(fid)
+                    prog.advance(task)
+
+            console.print(
+                f"[bold]{len(broken)} unreadable[/bold], "
+                f"{len(missing)} missing-on-disk, "
+                f"{len(rows) - len(broken) - len(missing)} ok"
+            )
+            for fid, path, reason in broken[:20]:
+                console.print(f"  [red]#{fid}[/red] {path}")
+                console.print(f"       {reason}")
+            if len(broken) > 20:
+                console.print(f"  ... and {len(broken) - 20} more")
+
+            if dry_run:
+                console.print("[yellow]dry-run — nothing changed[/yellow]")
+                return
+            for fid, _p, reason in broken:
+                conn.execute(
+                    "UPDATE files SET decode_failed=1, decode_error=? WHERE id=?",
+                    (f"check-readable: {reason}"[:500], fid),
+                )
+            # Files that vanished from disk mid-check → mark missing.
+            for fid in missing:
+                conn.execute("UPDATE files SET missing=1 WHERE id=?", (fid,))
+            console.print(
+                f"[green]tombstoned {len(broken)} unreadable file(s)[/green]"
+                + (f", marked {len(missing)} missing" if missing else "")
+                + ". Reverse unreadable ones with `clear-failures`."
+            )
+        finally:
+            conn.close()
+
     @parent.command(name="skip")
     def cmd_skip(
         target: str = typer.Argument(
