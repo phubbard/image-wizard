@@ -290,7 +290,7 @@ demand, so the rotation stays instant and reversible.
 | **Label faces** (`/faces/label`) | Streamlined one-at-a-time "who is this?" review. Shows the largest unnamed cluster as a strip of cropped face thumbnails (`/face-crop/{id}` crops the bbox out of the photo thumbnail), you type a name (autocomplete + auto-merge, same as the grid), and it advances to the next cluster. "Not a person" hides junk clusters (partial faces, false detections) so they don't reappear. Biggest clusters first, for maximum coverage per keystroke. |
 | **Cameras** (`/cameras`) → **Camera detail** (`/camera/{model}`) | Camera summaries; per-camera detail page filters to that model. Phones with multiple lens modules get a sub-pill row (Ultra wide / Main / Telephoto / Front) — the same physical lens may appear under several EXIF strings depending on camera mode, and the pills group those together. |
 | **Map** (`/map`) | Every geolocated photo on Leaflet/OSM with marker clustering. Click a marker for a popup. A banner links to the geotagging workflow when photos lack a location. |
-| **Geotag** (`/geotag`) | Workflow for adding locations to photos missing GPS (common on old scans). Type a place ("Paris France", "San Diego") into the search box — resolved offline against a 32k-city database, population-ranked — and the map flies there, or click/drag the map directly. Coordinates reverse-geocode to city/region/country on save. Walks the untagged photos in timeline order (cursor-based, so tagging mid-walk never skips any); the clicked point persists between photos so a same-place batch is quick; an optional checkbox tags every untagged photo from the same calendar day at once, then continues the walk from that same point in the timeline. Reachable from the Map banner, the "+ Add location" link on any GPS-less photo detail, or by multi-selecting on the timeline. |
+| **Geotag** (`/geotag`) | Workflow for adding locations to photos missing GPS (common on old scans). Type a place into the search box — a **city** ("Paris France", "San Diego") or a **landmark** ("Wrigley Field", "Eiffel Tower", "Yosemite", "Taj Mahal") — resolved offline against a 32k-city database plus a ~69k-entry landmarks gazetteer (stadiums, museums, parks, monuments, bridges, mountains…), and the map flies there, or click/drag the map directly. Coordinates reverse-geocode to city/region/country on save. Walks the untagged photos in timeline order (cursor-based, so tagging mid-walk never skips any); the clicked point persists between photos so a same-place batch is quick; an optional checkbox tags every untagged photo from the same calendar day at once, then continues the walk from that same point in the timeline. Reachable from the Map banner, the "+ Add location" link on any GPS-less photo detail, or by multi-selecting on the timeline. |
 
 **Batch geotagging from the timeline**: click **Select** on the timeline,
 tap the photos that belong to one place, then **📍 Geotag selected** —
@@ -356,7 +356,9 @@ imagewizard/
   db.py             SQLite schema, sqlite-vec, additive migrations
   scan.py           Directory walker, SHA-256 hashing, all maintenance CLIs
   metadata.py       ExifTool wrapper (thread-safe, batch mode)
-  geo.py            Offline reverse geocoding
+  geo.py            Offline reverse geocoding + city/landmark place search
+  data/             Bundled offline landmarks gazetteer (landmarks.tsv.gz;
+                    rebuild with `python tools/build_landmarks.py`, needs net)
   decode.py         HEIC / RAW / JPEG → RGB numpy (with EXIF orientation)
   thumbs.py         512px JPEG thumbnail cache
   pipeline.py       Concurrent ingestion orchestrator + checkpoint log

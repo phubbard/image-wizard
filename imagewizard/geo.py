@@ -12,9 +12,11 @@ Both are fully offline — the ~7 MB cities CSV ships with the library.
 from __future__ import annotations
 
 import csv
+import gzip
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +103,63 @@ def _load_cities() -> list[dict]:
     return _cities
 
 
+_landmarks: list[dict] | None = None
+
+
+def _load_landmarks() -> list[dict]:
+    """Load the bundled offline landmarks gazetteer once.
+
+    A compact gzipped TSV of notable POIs (stadiums, museums, parks,
+    monuments, …) built from Wikidata by ``tools/build_landmarks.py``.
+    Ships with the package; loaded lazily. Missing file → empty list
+    (landmark search silently disabled, city search still works).
+    """
+    global _landmarks
+    if _landmarks is not None:
+        return _landmarks
+    _landmarks = []
+    p = Path(__file__).parent / "data" / "landmarks.tsv.gz"
+    try:
+        if p.exists():
+            with gzip.open(p, "rt", encoding="utf-8") as f:
+                next(f, None)  # header
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 5:
+                        continue
+                    name, lat, lon, kind, sl = parts[:5]
+                    try:
+                        _landmarks.append({
+                            "name": name, "name_l": name.lower(),
+                            "lat": float(lat), "lon": float(lon),
+                            "kind": kind, "sitelinks": int(sl),
+                        })
+                    except ValueError:
+                        continue
+    except Exception as e:
+        log.warning("could not load landmarks gazetteer: %s", e)
+        _landmarks = []
+    return _landmarks
+
+
+def _name_score(nl: str, name_query: str, first: str) -> int | None:
+    """Match-quality score for a lower-cased name vs the query, or None
+    if it doesn't match at all. Shared by city + landmark search.
+
+    Hyphens are folded to spaces so "notre dame" matches "Notre-Dame de
+    Paris" (the query side is normalized the same way in search_places)."""
+    nl = nl.replace("-", " ")
+    if name_query not in nl and not nl.startswith(first):
+        return None
+    if nl == name_query:
+        return 100
+    if nl.startswith(name_query):
+        return 60
+    if name_query in nl:
+        return 30
+    return 10
+
+
 def country_name(cc: str) -> str:
     """ISO2 code → full country name (falls back to the code)."""
     _load_cities()
@@ -137,36 +196,47 @@ def search_places(query: str, limit: int = 8) -> list[PlaceHit]:
                 country_cc = cand.upper()
                 tokens = tokens[:-1]
                 break
-    name_query = " ".join(tokens).strip()
+    name_query = " ".join(tokens).strip().replace("-", " ")
     if not name_query:
         return []
     first = name_query.split()[0]
 
-    scored: list[tuple[int, int, PlaceHit]] = []
+    # Both cities and landmarks are matched by name; each carries an
+    # importance in [0,1] (city population vs Wikidata sitelinks, each
+    # normalized) so the two sources interleave sensibly — a famous
+    # landmark ranks alongside a major city, exact name matches first.
+    combined: list[tuple[int, float, PlaceHit]] = []
+
     for c in cities:
         name = c.get("name", "")
         if not name:
             continue
-        nl = name.lower()
-        if name_query not in nl and not nl.startswith(first):
+        score = _name_score(name.lower(), name_query, first)
+        if score is None:
             continue
         cc = c.get("countrycode", "")
         if country_cc and cc != country_cc:
             continue
-        if nl == name_query:
-            score = 100
-        elif nl.startswith(name_query):
-            score = 60
-        elif name_query in nl:
-            score = 30
-        else:
-            score = 10
         pop = int(c.get("population", 0) or 0)
         hit = PlaceHit(
             name=name, region=_country_names.get(cc, cc), country=cc,
             lat=float(c["latitude"]), lon=float(c["longitude"]),
         )
-        scored.append((score, pop, hit))
+        combined.append((score, min(1.0, pop / 1_000_000), hit))
 
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    return [h for _s, _p, h in scored[:limit]]
+    # Landmarks: no country filter (the gazetteer is name+coord+kind). The
+    # kind lands in `region` so the dropdown shows "Wrigley Field · stadium"
+    # and reads distinctly from a city row. Precise city/region/country get
+    # filled by reverse-geocode when the location is actually saved.
+    for lm in _load_landmarks():
+        score = _name_score(lm["name_l"], name_query, first)
+        if score is None:
+            continue
+        hit = PlaceHit(
+            name=lm["name"], region=lm["kind"], country="",
+            lat=lm["lat"], lon=lm["lon"],
+        )
+        combined.append((score, min(1.0, lm["sitelinks"] / 40.0), hit))
+
+    combined.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [h for _s, _imp, h in combined[:limit]]

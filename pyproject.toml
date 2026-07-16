@@ -63,6 +63,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imagewizard"]
+# Bundle the offline landmarks gazetteer (built by tools/build_landmarks.py).
+artifacts = ["imagewizard/data/*.tsv.gz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
