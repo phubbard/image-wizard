@@ -215,6 +215,20 @@ you see byte-identical VISIBLE siblings, `find-duplicates` just needs a
 re-run, whereas `dist > 0` siblings are near-duplicates that exact
 grouping can't merge.
 
+```bash
+# Compare two scan trees (e.g. the same library exported into two folder
+# layouts). Answers "which is bigger, and is one a superset?" using a
+# key that survives re-encoding (capture time + filename), since re-exported
+# copies have different bytes and content_hash won't match across them.
+image-wizard compare-roots "Photos export" "photoslibrary"
+image-wizard compare-roots "Photos export" "photoslibrary" --examples 5
+```
+
+Verdict is one of: `A ⊆ B` / `B ⊆ A` (one is a clean superset — drop the
+subset root, lose nothing), `identical sets`, or `partial overlap` (each
+has unique photos — dedupe instead of dropping a root). Photos with no
+capture date can't be keyed and are excluded from the verdict.
+
 ### Maintenance & repair
 
 ```bash

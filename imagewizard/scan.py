@@ -2546,3 +2546,111 @@ def register(parent: typer.Typer) -> None:
                 )
         finally:
             conn.close()
+
+    @parent.command(name="compare-roots")
+    def cmd_compare_roots(
+        prefix_a: str = typer.Argument(
+            ..., help="Path substring for the first tree, e.g. 'Photos export'."),
+        prefix_b: str = typer.Argument(
+            ..., help="Path substring for the second tree, e.g. 'photoslibrary'."),
+        key: str = typer.Option(
+            "exif", "--key",
+            help="Same-photo key: 'exif' (taken_at+filename — survives "
+                 "re-encoding, the default), 'phash' (perceptual; needs "
+                 "find-duplicates --visual first), 'taken' (timestamp only), "
+                 "or 'name' (filename only)."),
+        examples: int = typer.Option(
+            0, "--examples", "-e",
+            help="Print up to N example photos unique to each side."),
+    ) -> None:
+        """Compare two scan trees: counts, overlap, and a superset verdict.
+
+        The same library re-exported into two folder layouts has *different*
+        bytes per photo (so content_hash won't match across them). This keys
+        on capture time + filename instead — both preserved through
+        re-encoding — to answer "which tree is bigger, and is one a superset
+        of the other?" before you drop a redundant scan root.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            def load(prefix: str):
+                return conn.execute(
+                    """SELECT f.id, f.path, f.phash, pm.taken_at
+                       FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
+                       WHERE f.missing=0 AND f.kind='image' AND f.path LIKE ?""",
+                    (f"%{prefix}%",),
+                ).fetchall()
+
+            def keyf(r):
+                if key == "phash":
+                    return r["phash"] or None
+                if key == "name":
+                    return os.path.basename(r["path"]).lower()
+                if key == "taken":
+                    return r["taken_at"] or None
+                t = r["taken_at"]                       # 'exif' (default)
+                return f"{t}|{os.path.basename(r['path']).lower()}" if t else None
+
+            def keyset(rows):
+                keyed, unkeyed = {}, 0
+                for r in rows:
+                    k = keyf(r)
+                    if k is None:
+                        unkeyed += 1
+                    else:
+                        keyed.setdefault(k, r)
+                return keyed, unkeyed
+
+            rows_a, rows_b = load(prefix_a), load(prefix_b)
+            ka, ua = keyset(rows_a)
+            kb, ub = keyset(rows_b)
+            sa, sb = set(ka), set(kb)
+            only_a, only_b, both = sa - sb, sb - sa, sa & sb
+
+            def line(lbl, rows, keyed, unk):
+                extra = f", {unk} unkeyable (no date)" if unk else ""
+                console.print(f"[bold]{lbl}[/bold]: {len(rows)} photos, "
+                              f"{len(keyed)} distinct{extra}")
+            line(f"A ~{prefix_a!r}", rows_a, sa, ua)
+            line(f"B ~{prefix_b!r}", rows_b, sb, ub)
+            console.print(f"\n[dim]same-photo key = {key}[/dim]")
+            console.print(f"  in both:  {len(both)}")
+            console.print(f"  A only:   {len(only_a)}")
+            console.print(f"  B only:   {len(only_b)}")
+
+            console.print()
+            if not sa and not sb:
+                console.print("[yellow]nothing keyed[/yellow] — most photos "
+                              "lack a capture date; retry with --key name")
+            elif not only_a and not only_b:
+                console.print("[green]identical sets[/green] — either root can go.")
+            elif not only_a:
+                console.print(f"[green]A ⊆ B[/green] — B is a superset. Every "
+                              f"photo in A is also in B; dropping root A "
+                              f"({len(rows_a)} files) loses nothing.")
+            elif not only_b:
+                console.print(f"[green]B ⊆ A[/green] — A is a superset. Every "
+                              f"photo in B is also in A; dropping root B "
+                              f"({len(rows_b)} files) loses nothing.")
+            else:
+                console.print(f"[yellow]partial overlap[/yellow] — A has "
+                              f"{len(only_a)} photos not in B, B has "
+                              f"{len(only_b)} not in A. Neither is a clean "
+                              f"superset; dedupe rather than drop a root.")
+            if (ua or ub) and (only_a or only_b):
+                console.print("[dim](photos with no capture date aren't keyed; "
+                              "they're excluded from the verdict.)[/dim]")
+
+            if examples:
+                def show(lbl, keys, kmap):
+                    if not keys:
+                        return
+                    console.print(f"\n[bold]{lbl} (up to {examples}):[/bold]")
+                    for k in list(keys)[:examples]:
+                        console.print(f"  {kmap[k]['path']}")
+                show("A only", only_a, ka)
+                show("B only", only_b, kb)
+        finally:
+            conn.close()
