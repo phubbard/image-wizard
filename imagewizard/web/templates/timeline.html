@@ -41,6 +41,7 @@
     }
     .select-toggle.on { background: var(--highlight); border-color: var(--highlight); color: #fff; }
     /* selection state on grid thumbnails */
+    body.selecting .grid { user-select: none; -webkit-user-select: none; }
     body.selecting .grid a { cursor: pointer; }
     .grid a.selected { outline: 3px solid var(--highlight); outline-offset: -3px; border-radius: 4px; }
     .grid a.selected::after {
@@ -140,16 +141,38 @@ if (history.scrollRestoration) history.scrollRestoration = 'auto';
     toggle.addEventListener('click', () => setMode(!document.body.classList.contains('selecting')));
     document.getElementById('select-cancel').addEventListener('click', () => setMode(false));
 
+    // The last plainly-clicked thumbnail — the anchor for shift-click
+    // range selection (Finder-style).
+    let anchor = null;
+
+    function setSel(a, on) {
+        if (on) { selected.add(a.dataset.photoId); a.classList.add('selected'); }
+        else { selected.delete(a.dataset.photoId); a.classList.remove('selected'); }
+    }
+
     // In select mode, clicking a thumbnail toggles selection instead of
-    // navigating. Delegated so htmx-appended thumbnails work too.
+    // navigating. Shift-click selects the whole range from the anchor to
+    // the clicked thumbnail (in grid order), like the Finder. Delegated
+    // so htmx-appended thumbnails work too.
     grid.addEventListener('click', (e) => {
         if (!document.body.classList.contains('selecting')) return;
         const a = e.target.closest('a[data-photo-id]');
         if (!a) return;
         e.preventDefault();
-        const id = a.dataset.photoId;
-        if (selected.has(id)) { selected.delete(id); a.classList.remove('selected'); }
-        else { selected.add(id); a.classList.add('selected'); }
+
+        if (e.shiftKey && anchor && anchor !== a) {
+            const all = Array.from(grid.querySelectorAll('a[data-photo-id]'));
+            let i = all.indexOf(anchor), j = all.indexOf(a);
+            if (i !== -1 && j !== -1) {
+                if (i > j) { const t = i; i = j; j = t; }
+                for (let k = i; k <= j; k++) setSel(all[k], true);
+            }
+            // Anchor stays put so successive shift-clicks re-extend from
+            // the same origin, matching the Finder.
+        } else {
+            setSel(a, !selected.has(a.dataset.photoId));
+            anchor = a;
+        }
         refresh();
     });
 
