@@ -104,9 +104,6 @@
         cursor: pointer;
     }
     .rot-btn:hover { background: var(--accent); opacity: 1; }
-    /* Wrapper that reserves the rotated footprint for 90/270 so the
-       rotated image + its bboxes don't overflow the layout. */
-    #img-wrap { transition: none; }
     .full-link { font-size: 0.8rem; color: var(--muted); margin-left: auto; }
     .full-link:hover { color: var(--highlight); }
     .photo-nav {
@@ -432,28 +429,20 @@ const FILE_ID = {{ file['id'] }};
 })();
 
 // --- Detail-page rotation ---------------------------------------------
-// Rotate the whole #img-wrap (image + bounding boxes) as a unit so the
-// face/object boxes stay aligned. For 90/270 we swap the wrapper's
-// reserved footprint so the rotated image doesn't overlap the sidebar.
+// The full image is served pre-rotated by /full (rotation baked into the
+// pixels), so we do NOT CSS-rotate it here — that would double it. We only
+// (a) reload the image after a rotate and (b) rotate the bbox coordinates
+// to match the baked pixels.
 let detailRotation = {{ file['rotation'] or 0 }};
 
-function applyDetailRotation() {
-    const wrap = document.getElementById('img-wrap');
-    const img = document.getElementById('detail-img');
-    if (!wrap || !img) return;
-    const deg = ((detailRotation % 360) + 360) % 360;
-    wrap.style.transformOrigin = 'center center';
-    wrap.style.transform = deg ? `rotate(${deg}deg)` : '';
-    if (deg % 180 !== 0) {
-        // Reserve the rotated footprint: what was H becomes W and vice versa.
-        wrap.style.width = img.clientHeight + 'px';
-        wrap.style.height = img.clientWidth + 'px';
-        // Constrain so a rotated portrait doesn't exceed the column.
-        img.style.maxWidth = '70vh';
-    } else {
-        wrap.style.width = '';
-        wrap.style.height = '';
-        img.style.maxWidth = '';
+// Rotate a normalized top-left box (x,y,w,h) clockwise by deg to match an
+// image whose pixels were rotated the same way. Returns [x,y,w,h].
+function rotateBox(x, y, w, h, deg) {
+    switch (((deg % 360) + 360) % 360) {
+        case 90:  return [1 - (y + h), x, h, w];
+        case 180: return [1 - (x + w), 1 - (y + h), w, h];
+        case 270: return [y, 1 - (x + w), h, w];
+        default:  return [x, y, w, h];
     }
 }
 
@@ -461,37 +450,38 @@ document.querySelectorAll('.rot-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         const delta = parseInt(btn.dataset.delta, 10);
         detailRotation = ((detailRotation + delta) % 360 + 360) % 360;
-        applyDetailRotation();
         const body = new FormData();
         body.append('delta', String(delta));
-        fetch(`/photo/${FILE_ID}/rotate`, { method: 'POST', body });
+        fetch(`/photo/${FILE_ID}/rotate`, { method: 'POST', body })
+            .then(() => {
+                // /full/{id} URL is constant but its bytes changed; bust
+                // the cache. placeBboxes re-runs on the image's onload.
+                const img = document.getElementById('detail-img');
+                if (img) img.src = `/full/${FILE_ID}?v=${detailRotation}`;
+            });
     });
 });
 
 function placeBboxes() {
     const img = document.getElementById('detail-img');
+    if (!img) return;
     const imgW = img.clientWidth;
     const imgH = img.clientHeight;
-    // Apply any stored/user rotation once the image has its dimensions.
-    applyDetailRotation();
 
     document.querySelectorAll('.bbox').forEach(el => {
         const x = parseFloat(el.dataset.x);
         const y = parseFloat(el.dataset.y);
         const w = parseFloat(el.dataset.w);
         const h = parseFloat(el.dataset.h);
-
-        if (el.dataset.type === 'det') {
-            el.style.left   = ((x - w/2) * imgW) + 'px';
-            el.style.top    = ((y - h/2) * imgH) + 'px';
-            el.style.width  = (w * imgW) + 'px';
-            el.style.height = (h * imgH) + 'px';
-        } else {
-            el.style.left   = (x * imgW) + 'px';
-            el.style.top    = (y * imgH) + 'px';
-            el.style.width  = (w * imgW) + 'px';
-            el.style.height = (h * imgH) + 'px';
-        }
+        // Detections store the box center; faces store the top-left.
+        // Normalize both to top-left, then rotate to match the baked image.
+        const x0 = el.dataset.type === 'det' ? x - w / 2 : x;
+        const y0 = el.dataset.type === 'det' ? y - h / 2 : y;
+        const [rx, ry, rw, rh] = rotateBox(x0, y0, w, h, detailRotation);
+        el.style.left   = (rx * imgW) + 'px';
+        el.style.top    = (ry * imgH) + 'px';
+        el.style.width  = (rw * imgW) + 'px';
+        el.style.height = (rh * imgH) + 'px';
     });
 }
 

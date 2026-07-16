@@ -17,9 +17,52 @@ from PIL import Image
 THUMB_SIZE = 512
 THUMB_QUALITY = 80
 
+# Rotation is stored as clockwise degrees (0/90/180/270). PIL's transpose
+# constants rotate *counter*-clockwise, so 90° CW == ROTATE_270, etc.
+_CW_TRANSPOSE = {
+    90: Image.Transpose.ROTATE_270,
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_90,
+}
+
 
 def thumb_path(cache_dir: Path, content_hash: str) -> Path:
     return cache_dir / "thumbs" / content_hash[:2] / f"{content_hash}.jpg"
+
+
+def rotated_path(cache_dir: Path, content_hash: str, degrees: int,
+                 subdir: str = "thumbs") -> Path:
+    """Cache path for a rotation-baked variant.
+
+    The rotation is encoded in the filename (``…​.r90.jpg``) so a fresh
+    rotation value maps to a fresh file — no stale-serve possible, and
+    ``degrees=0`` never lands here (callers serve the base image instead).
+    """
+    return (cache_dir / subdir / content_hash[:2]
+            / f"{content_hash}.r{degrees % 360}.jpg")
+
+
+def ensure_rotated(base: Path, out: Path, degrees: int,
+                   quality: int = THUMB_QUALITY) -> Path:
+    """Bake a clockwise rotation into a JPEG derived from ``base``.
+
+    Idempotent: returns immediately if ``out`` already exists. Used to
+    serve grid thumbnails and full images with the user's manual
+    rotation applied to the actual pixels (so click-through and
+    copy/paste reflect it), rather than as a display-only CSS transform.
+    """
+    deg = degrees % 360
+    if out.exists():
+        return out
+    im = Image.open(base)
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+    tr = _CW_TRANSPOSE.get(deg)
+    if tr is not None:
+        im = im.transpose(tr)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    im.save(out, "JPEG", quality=quality)
+    return out
 
 
 def ensure_thumbnail(

@@ -235,9 +235,11 @@
         <button data-delta="180">⤢ Rotate 180°</button>
     </div>
     <script>
-    // Right-click rotate menu for grid thumbnails. Applies the rotation
-    // as a CSS transform immediately and persists it via POST. Works on
-    // any page with a .grid (timeline, search, person, camera, nearby).
+    // Right-click rotate menu for grid thumbnails. Reloads the thumbnail
+    // with the new rotation baked into the pixels (via ?rot=) and persists
+    // it via POST — a display-only CSS transform wouldn't survive copy to
+    // the clipboard. Works on any page with a .grid (timeline, search,
+    // person, camera, nearby).
     (function () {
         const menu = document.getElementById('ctx-menu');
         let targetImg = null;   // the <img> we'll rotate
@@ -264,7 +266,8 @@
             const cur = parseInt(targetImg.dataset.rotation || '0', 10);
             const next = ((cur + delta) % 360 + 360) % 360;
             targetImg.dataset.rotation = next;
-            targetImg.style.transform = next ? `rotate(${next}deg)` : '';
+            const base = targetImg.src.split('?')[0];
+            targetImg.src = next ? `${base}?rot=${next}` : base;
             menu.style.display = 'none';
             const body = new FormData();
             body.append('delta', String(delta));

@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import config, db
-from ..thumbs import thumb_path
+from ..thumbs import ensure_rotated, rotated_path, thumb_path
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=WEB_DIR / "templates")
@@ -365,12 +365,13 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
             # "Through the years": best face per calendar year.
             year_faces = conn.execute(
-                """SELECT yr, face_id, file_id, content_hash, person_name
+                """SELECT yr, face_id, file_id, content_hash, person_name, rotation
                    FROM (
                        SELECT SUBSTR(pm.taken_at, 1, 4) AS yr,
                               fa.id          AS face_id,
                               fa.file_id     AS file_id,
                               f.content_hash AS content_hash,
+                              f.rotation     AS rotation,
                               fa.person_name AS person_name,
                               ROW_NUMBER() OVER (
                                   PARTITION BY SUBSTR(pm.taken_at, 1, 4)
@@ -1076,9 +1077,11 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
         Body param ``delta`` is degrees clockwise: 90 (right), -90
         (left), or 180. The stored rotation accumulates modulo 360.
-        Non-destructive — the original file and cached thumbnail are
-        untouched; the rotation is applied as a CSS transform at render
-        time. Returns JSON {"rotation": N}.
+        Non-destructive — the original file and base cached thumbnail are
+        untouched; the rotation is baked into the pixels on the fly when
+        /full and /thumb?rot= serve the image (cached under full_rot/ and
+        thumbs/…rN.jpg), so click-through and copy/paste reflect it.
+        Returns JSON {"rotation": N}.
         """
         form = await request.form()
         try:
@@ -2016,7 +2019,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return HTMLResponse("crop error", 500)
 
     @app.get("/thumb/{content_hash}")
-    async def serve_thumb(content_hash: str):
+    async def serve_thumb(content_hash: str, rot: int = 0):
         """Serve a 512px thumbnail, generating + caching on demand.
 
         Older photos (and photos from machines that haven't run
@@ -2025,10 +2028,29 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         grid pages — we look up the source file by content_hash, decode
         it, write the thumb to the cache, then serve it. Subsequent
         requests hit the cache.
+
+        ``?rot=`` bakes a manual rotation (clockwise degrees) into the
+        served pixels so the grid image can be copied/pasted with the
+        rotation applied — a display-only CSS transform never makes it
+        into the clipboard bytes. The base thumb is generated first (if
+        needed), then a rotation-specific variant is derived from it.
         """
         p = thumb_path(cfg.cache_dir, content_hash)
+
+        def _rotated_or(base: Path):
+            deg = rot % 360
+            if not deg:
+                return FileResponse(base, media_type="image/jpeg")
+            try:
+                out = ensure_rotated(
+                    base, rotated_path(cfg.cache_dir, content_hash, deg), deg)
+                return FileResponse(out, media_type="image/jpeg")
+            except Exception as e:  # fall back to the unrotated base
+                log.warning("thumb rotate failed for %s: %s", content_hash, e)
+                return FileResponse(base, media_type="image/jpeg")
+
         if p.exists():
-            return FileResponse(p, media_type="image/jpeg")
+            return _rotated_or(p)
 
         conn = get_conn()
         try:
@@ -2057,7 +2079,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             else:
                 arr = decode.load_image(src)
             out = ensure_thumbnail(arr, cfg.cache_dir, content_hash)
-            return FileResponse(out, media_type="image/jpeg")
+            return _rotated_or(out)
         except Exception as e:
             log.warning("thumb generation failed for %s: %s", src, e)
             return HTMLResponse("decode error", 500)
@@ -2080,11 +2102,14 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     }
 
     @app.get("/full/{file_id}")
-    async def serve_full(file_id: int):
+    async def serve_full(file_id: int, v: int = 0):
+        # ``v`` is an ignored cache-buster: the /full/{id} URL is constant
+        # but its bytes change when the user rotates, so the detail page
+        # appends ?v=<rotation> to force the browser to refetch.
         conn = get_conn()
         try:
             row = conn.execute(
-                "SELECT path, content_hash, kind, missing FROM files "
+                "SELECT path, content_hash, kind, missing, rotation FROM files "
                 "WHERE id=?",
                 (file_id,),
             ).fetchone()
@@ -2122,18 +2147,46 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                     p, media_type=_VIDEO_MIME.get(ext, "application/octet-stream"),
                 )
 
+            # Manual rotation (clockwise degrees) is baked into the served
+            # pixels — not applied as a display-only CSS transform — so
+            # opening /full directly and copy/paste both reflect it. The
+            # rotated variant is cached under full_rot/, keyed by
+            # content_hash+degrees (same hash == same source pixels, so the
+            # cache is shared correctly across byte-identical files).
+            deg = (row["rotation"] or 0) % 360
+
+            def _rotated_full(base: Path):
+                try:
+                    out = ensure_rotated(
+                        base,
+                        rotated_path(cfg.cache_dir, row["content_hash"],
+                                     deg, "full_rot"),
+                        deg, quality=92)
+                    return FileResponse(out, media_type="image/jpeg")
+                except Exception as e:
+                    log.warning("/full/%s: rotate failed: %s", file_id, e)
+                    return None
+
             # Images: hand back the source file if the browser can render
             # it directly; else serve the cached JPEG thumbnail (HEIC,
             # RAW, TIFF, etc.).
             if ext not in _WEB_IMG_EXTS:
                 tp = thumb_path(cfg.cache_dir, row["content_hash"])
                 if tp.exists():
+                    if deg:
+                        r = _rotated_full(tp)
+                        if r is not None:
+                            return r
                     return FileResponse(tp, media_type="image/jpeg")
                 # Non-web ext AND no thumb — fall through to source file,
                 # which the browser probably can't render but at least
                 # confirms it exists.
             if not p.exists():
                 return _missing("source file not accessible")
+            if deg:
+                r = _rotated_full(p)
+                if r is not None:
+                    return r
             return FileResponse(p)
         finally:
             conn.close()

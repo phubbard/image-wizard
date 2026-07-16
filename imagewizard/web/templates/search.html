@@ -47,9 +47,8 @@
 <div class="grid">
     {% for p in photos %}
     <a href="/photo/{{ p['id'] }}{{ search_qs }}" data-photo-id="{{ p['id'] }}">
-        <img src="/thumb/{{ p['content_hash'] }}" loading="lazy" alt=""
-             data-rotation="{{ p['rotation'] or 0 }}"
-             {% if p['rotation'] %}style="transform: rotate({{ p['rotation'] }}deg)"{% endif %}>
+        <img src="/thumb/{{ p['content_hash'] }}{% if p['rotation'] %}?rot={{ p['rotation'] }}{% endif %}" loading="lazy" alt=""
+             data-rotation="{{ p['rotation'] or 0 }}">
         {% if p['kind'] == 'video' %}<span class="video-badge">▶ {% if p['duration_sec'] %}{{ '%d:%02d'|format(p['duration_sec']//60, p['duration_sec']%60) }}{% else %}video{% endif %}</span>{% endif %}
         {% if p['live_video_id'] %}{% include "_live_badge.html" %}{% endif %}
         <span class="caption">

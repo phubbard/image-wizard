@@ -268,8 +268,14 @@ position you left.
 **Rotating photos** (for old scans with no EXIF orientation): right-click
 any grid thumbnail for a rotate menu (left/right 90°, 180°), or use the
 ↺ ↻ ⤢ buttons on the photo detail page. Rotation is stored per-photo and
-applied as a CSS transform — non-destructive (the original file and its
-cached thumbnail are never re-encoded), instant, and reversible.
+**baked into the served pixels on the fly** — the grid thumbnail
+(`/thumb/{hash}?rot=N`) and full image (`/full/{id}`) both hand back
+already-rotated bytes, so opening the full image and copy/pasting into
+another app reflect the rotation (a display-only CSS transform never
+survives the clipboard). Still non-destructive: the original file and the
+base cached thumbnail are never re-encoded — rotated variants are cached
+separately (`thumbs/…rN.jpg`, `full_rot/…rN.jpg`) and regenerated on
+demand, so the rotation stays instant and reversible.
 | **Person** (`/person/{name}`) | Per-person timeline. Aggregates every face cluster sharing this identity (handles multi-cluster + multi-name same-person cases). Shows a "through the years" face strip and a "names through time" editor for adding name epochs (`Amy Bee` until 2012-07-01, `Amy Smith` after) — caption text on each photo uses the era-appropriate name. |
 | **Faces** (`/faces`) | Grid of face clusters with autocomplete naming. Typing an existing name auto-merges clusters. Multi-select for explicit merges. Pagination via infinite scroll. A banner links to the labelling flow when clusters are unnamed. |
 | **Label faces** (`/faces/label`) | Streamlined one-at-a-time "who is this?" review. Shows the largest unnamed cluster as a strip of cropped face thumbnails (`/face-crop/{id}` crops the bbox out of the photo thumbnail), you type a name (autocomplete + auto-merge, same as the grid), and it advances to the next cluster. "Not a person" hides junk clusters (partial faces, false detections) so they don't reappear. Biggest clusters first, for maximum coverage per keystroke. |
