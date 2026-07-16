@@ -316,6 +316,16 @@ image-wizard find-duplicates --visual         # group by PERCEPTUAL hash — als
                                               # (content_hash differs). Combine
                                               # with --dedupe-index or --delete.
 image-wizard find-duplicates --visual --dedupe-index
+image-wizard find-duplicates --near 12        # NEAR-duplicate mode: same
+                                              # filename AND phash within 12
+                                              # Hamming bits. Catches copies
+                                              # re-encoded across export trees
+                                              # whose phashes drifted a few
+                                              # bits (exact --visual can't).
+                                              # The filename requirement keeps
+                                              # distinct look-alike shots (a
+                                              # wedding series!) from merging.
+image-wizard find-duplicates --near 12 --dedupe-index
 image-wizard find-duplicates --reset          # un-hide everything (clear dup_of)
 image-wizard find-duplicates --delete         # unlink redundant files from disk
 

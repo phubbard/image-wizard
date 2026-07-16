@@ -121,7 +121,8 @@ _PHOTO_LIBRARY_SKIP_DIRS = frozenset({
 def _is_inside_photo_library(dirpath: str) -> bool:
     """True if dirpath is anywhere under an Apple photo library bundle."""
     lower = dirpath.lower()
-    return ".photoslibrary" in lower or "iphoto library" in lower
+    return (".photoslibrary" in lower or "iphoto library" in lower
+            or ".aplibrary" in lower)   # Aperture
 
 
 def _find_last_in_flight(log_path: "Path") -> tuple[int, str] | None:
@@ -895,6 +896,15 @@ def register(parent: typer.Typer) -> None:
             0, "--limit",
             help="Stop after processing this many duplicate groups (0 = all).",
         ),
+        near: int = typer.Option(
+            0, "--near",
+            help="Near-duplicate mode (implies perceptual hashing): group "
+                 "photos that share a filename AND whose phash is within this "
+                 "Hamming distance. Catches copies re-encoded across export "
+                 "trees whose phashes drifted a few bits apart, which exact "
+                 "--visual grouping misses. Try 10. The filename requirement "
+                 "keeps distinct adjacent shots from being merged.",
+        ),
         verbose: bool = typer.Option(
             False, "--verbose", help="Print every group (slow for thousands)."
         ),
@@ -939,6 +949,143 @@ def register(parent: typer.Typer) -> None:
                 )
                 return
 
+            def _tiebreak(rows):
+                if keep == "shortest-path":
+                    return min(rows, key=lambda r: (len(r["path"]), r["path"]))
+                if keep == "longest-path":
+                    return max(rows, key=lambda r: (len(r["path"]), r["path"]))
+                if keep == "oldest":
+                    return min(rows, key=lambda r: r["mtime"])
+                return max(rows, key=lambda r: r["mtime"])
+
+            def _picker(rows):
+                # Preserve metadata: prefer copies with GPS, then with a
+                # date, then apply the tie-break rule within the best tier.
+                with_gps = [r for r in rows if r["lat"] is not None]
+                if with_gps:
+                    return _tiebreak(with_gps)
+                with_date = [r for r in rows if r["taken_at"]]
+                if with_date:
+                    return _tiebreak(with_date)
+                return _tiebreak(rows)
+
+            if near > 0:
+                # Near-duplicate mode: same filename AND phash within `near`
+                # Hamming bits. Catches copies re-encoded across export trees
+                # whose phashes drifted (exact --visual can't merge those),
+                # without touching distinct adjacent shots — those don't
+                # share a filename, so they never land in the same bucket.
+                from collections import defaultdict
+                nph = compute_phashes(conn, cfg.cache_dir, console)
+                if nph:
+                    console.print(f"[dim]computed {nph} perceptual hashes[/dim]")
+                cands = conn.execute(
+                    """SELECT f.id, f.path, f.size, f.mtime, f.phash,
+                              pm.lat AS lat, pm.taken_at AS taken_at
+                       FROM files f LEFT JOIN photo_meta pm ON pm.file_id=f.id
+                       WHERE f.missing=0 AND f.too_small=0 AND f.dup_of IS NULL
+                         AND f.phash IS NOT NULL AND f.phash!=''
+                         AND COALESCE(f.kind,'image') != 'video'"""
+                ).fetchall()
+                buckets: dict = defaultdict(list)
+                for r in cands:
+                    try:
+                        pv = int(r["phash"], 16)
+                    except (ValueError, TypeError):
+                        continue
+                    buckets[os.path.basename(r["path"]).lower()].append((r, pv))
+
+                groups: list = []
+                for _name, items in buckets.items():
+                    m = len(items)
+                    if m < 2:
+                        continue
+                    parent = list(range(m))
+
+                    def _find(x):
+                        while parent[x] != x:
+                            parent[x] = parent[parent[x]]
+                            x = parent[x]
+                        return x
+
+                    for a in range(m):
+                        pa = items[a][1]
+                        for b in range(a + 1, m):
+                            if bin(pa ^ items[b][1]).count("1") <= near:
+                                parent[_find(a)] = _find(b)
+                    clusters: dict = defaultdict(list)
+                    for k in range(m):
+                        clusters[_find(k)].append(items[k][0])
+                    for members in clusters.values():
+                        if len(members) > 1:
+                            groups.append(members)
+
+                total_dup = sum(len(g) - 1 for g in groups)
+                console.print(
+                    f"[yellow]{len(groups)} near-duplicate groups[/yellow] "
+                    f"covering {total_dup} redundant files "
+                    f"(filename + phash Hamming ≤ {near})"
+                )
+                acting = delete or dedupe_index
+                if not acting:
+                    console.print("[dim]dry run — pass --dedupe-index (keep "
+                                  "files) or --delete (remove files)[/dim]")
+                    if verbose:
+                        for g in groups[:300]:
+                            keeper = _picker(g)
+                            console.print(
+                                f"\n[bold]{os.path.basename(keeper['path'])}"
+                                f"[/bold] ({len(g)} copies)")
+                            for r in g:
+                                tag = ("[green]keep[/green]"
+                                       if r["id"] == keeper["id"]
+                                       else "[red]dup [/red]")
+                                console.print(f"  {tag} {r['path']}")
+                    return
+
+                removed = errors = 0
+                freed_bytes = 0
+                from rich.progress import (Progress, BarColumn,
+                                           MofNCompleteColumn, SpinnerColumn)
+                with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                              console=Console(stderr=True)) as prog:
+                    task = prog.add_task("near-dedup", total=len(groups))
+                    for gi, g in enumerate(groups):
+                        if limit and gi >= limit:
+                            break
+                        keeper = _picker(g)
+                        for r in g:
+                            if r["id"] == keeper["id"]:
+                                continue
+                            try:
+                                if delete:
+                                    p = Path(r["path"])
+                                    if p.exists():
+                                        p.unlink()
+                                    freed_bytes += r["size"] or 0
+                                    delete_file_row(conn, r["id"])
+                                else:
+                                    conn.execute(
+                                        "UPDATE files SET dup_of=? WHERE id=?",
+                                        (keeper["id"], r["id"]))
+                                removed += 1
+                            except OSError as e:
+                                errors += 1
+                                console.print(f"    [red]error:[/red] {e}")
+                        prog.advance(task)
+                        if gi % 200 == 0:
+                            conn.commit()
+                    conn.commit()
+                if delete:
+                    console.print(
+                        f"\n[green]removed {removed} files from disk[/green] "
+                        f"(~{freed_bytes/(1024*1024):.1f} MB), errors: {errors}")
+                else:
+                    console.print(
+                        f"\n[green]hid {removed} near-duplicate copies[/green] "
+                        f"(files + rows kept, marked dup_of), errors: {errors}")
+                return
+
             # Grouping key: exact content_hash (default) or perceptual
             # phash (--visual, for byte-different visual duplicates).
             key_col = "phash" if visual else "content_hash"
@@ -975,26 +1122,6 @@ def register(parent: typer.Typer) -> None:
                     "[dim]dry run — pass --dedupe-index (keep files) or "
                     "--delete (remove files)[/dim]"
                 )
-
-            def _tiebreak(rows):
-                if keep == "shortest-path":
-                    return min(rows, key=lambda r: (len(r["path"]), r["path"]))
-                if keep == "longest-path":
-                    return max(rows, key=lambda r: (len(r["path"]), r["path"]))
-                if keep == "oldest":
-                    return min(rows, key=lambda r: r["mtime"])
-                return max(rows, key=lambda r: r["mtime"])
-
-            def _picker(rows):
-                # Preserve metadata: prefer copies with GPS, then with a
-                # date, then apply the tie-break rule within the best tier.
-                with_gps = [r for r in rows if r["lat"] is not None]
-                if with_gps:
-                    return _tiebreak(with_gps)
-                with_date = [r for r in rows if r["taken_at"]]
-                if with_date:
-                    return _tiebreak(with_date)
-                return _tiebreak(rows)
 
             removed = 0
             freed_bytes = 0

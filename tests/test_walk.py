@@ -28,6 +28,15 @@ def test_photoslibrary_skips_derivatives_keeps_originals(tmp_path):
     assert "r.jpg" not in found
 
 
+def test_aperture_library_previews_skipped(tmp_path):
+    lib = tmp_path / "Aperture Library.aplibrary"
+    _mk(lib / "Masters" / "2011" / "orig.jpg")     # Aperture originals
+    _mk(lib / "Previews" / "2011" / "prev.jpg")     # derivative
+    found = {p.name for p in scan._walk_one_root(lib)}
+    assert "orig.jpg" in found
+    assert "prev.jpg" not in found
+
+
 def test_previews_only_skipped_inside_a_library(tmp_path):
     # A user's ordinary folder that happens to be named "Previews" must
     # NOT be skipped — the exclusion only applies inside a photo library.
