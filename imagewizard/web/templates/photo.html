@@ -350,6 +350,13 @@
         </div>
         {% endif %}
 
+        {% if ocr_text %}
+        <h3 style="margin-top:1rem;">Text in photo</h3>
+        <div style="font-size:0.8rem;white-space:pre-wrap;color:var(--fg);
+                    background:var(--bg);padding:0.5rem;border-radius:4px;
+                    max-height:180px;overflow-y:auto;">{{ ocr_text }}</div>
+        {% endif %}
+
         {# Pipeline state — one-glance diagnostic for "why does this
            photo have no detections/faces?". A ✓ means the stage ran to
            completion on this file; ✗ means it hasn't run yet. If a
@@ -362,6 +369,7 @@
                 ('Objects (YOLO)', file['yolo_done']),
                 ('Faces', file['faces_done']),
                 ('CLIP embedding', file['clip_done']),
+                ('OCR (text)', file['ocr_done']),
             ] %}
             {% for name, done in stages %}
             <div style="display:flex;justify-content:space-between;padding:2px 0;">

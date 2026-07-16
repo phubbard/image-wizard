@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import math
+import sqlite3
 import struct
 from pathlib import Path
 
@@ -547,6 +548,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         # set instead of the full timeline, so you can page through a
         # search from the detail view.
         q: str = Query(""),
+        text: str = Query(""),
         label: str = Query(""),
         camera: str = Query(""),
         person: str = Query(""),
@@ -570,8 +572,12 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "SELECT id, cluster_id, person_name, det_score, x, y, w, h FROM faces WHERE file_id=?",
                 (file_id,),
             ).fetchall()
+            ocr_row = conn.execute(
+                "SELECT text FROM ocr_fts WHERE rowid=?", (file_id,)
+            ).fetchone()
+            ocr_text = ocr_row["text"] if ocr_row else None
 
-            search_qs = _search_qs(q, label, camera, person, cluster, country, k)
+            search_qs = _search_qs(q, label, camera, person, cluster, country, k, text)
             in_search = bool(search_qs)
 
             prev_id: int | None = None
@@ -583,7 +589,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 # Walk the same list as /search. Result order matters:
                 # CLIP uses distance, others use taken_at DESC.
                 results = _run_search(conn, q, label, camera, person,
-                                      cluster, country, k)
+                                      cluster, country, k, text)
                 ids = [r["id"] for r in results]
                 if file_id in ids:
                     idx = ids.index(file_id)
@@ -664,12 +670,14 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "search_total": search_total,
                 "timeline_link": timeline_link,
                 "people": _all_people(conn),
+                "ocr_text": ocr_text,
             })
         finally:
             conn.close()
 
     def _run_search(conn, q: str, label: str, camera: str, person: str,
-                    cluster: int | None, country: str, k: int) -> list:
+                    cluster: int | None, country: str, k: int,
+                    text: str = "") -> list:
         """Execute the first matching filter and return a list of result rows.
 
         Used by both the /search page and /photo/{id} (so prev/next on the
@@ -682,6 +690,27 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         return fewer than ``k`` rows when the filter is strict.
         """
         rfrag, rparams = _root_filter_sql(_get_visible_roots(conn))
+        if text:
+            # Full-text search over OCR'd text (Apple Vision), ranked by
+            # FTS5 relevance. The MATCH query supports FTS5 syntax
+            # (phrases in quotes, AND/OR, prefixes with *).
+            try:
+                return conn.execute(
+                    f"""SELECT f.id, f.path, f.content_hash, f.kind,
+                               f.duration_sec, f.live_video_id, f.rotation,
+                               pm.taken_at, pm.camera_model, pm.city, pm.country
+                        FROM ocr_fts
+                        JOIN files f ON f.id = ocr_fts.rowid
+                        LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                        WHERE ocr_fts MATCH ? AND f.missing = 0
+                          AND f.live_photo_of IS NULL AND f.dup_of IS NULL {rfrag}
+                        ORDER BY rank
+                        LIMIT ?""",
+                    [text] + rparams + [k],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Malformed FTS query (unbalanced quotes etc.) — no results.
+                return []
         if q:
             from ..models.clip import embed_text
             vec = embed_text(q)
@@ -764,7 +793,8 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         return []
 
     def _search_qs(q: str, label: str, camera: str, person: str,
-                   cluster: int | None, country: str, k: int) -> str:
+                   cluster: int | None, country: str, k: int,
+                   text: str = "") -> str:
         """Build a '?q=...&label=...' query-string for threading search
         filters through photo detail links. Includes the leading '?' so
         it can be appended directly to a path, or is empty when no filter
@@ -772,6 +802,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
         from urllib.parse import urlencode
         parts: list[tuple[str, str]] = []
         if q: parts.append(("q", q))
+        if text: parts.append(("text", text))
         if label: parts.append(("label", label))
         if camera: parts.append(("camera", camera))
         if person: parts.append(("person", person))
@@ -786,6 +817,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     async def search_page(
         request: Request,
         q: str = Query("", description="CLIP text query"),
+        text: str = Query("", description="OCR full-text query"),
         label: str = Query("", description="YOLO label filter"),
         camera: str = Query("", description="Camera model filter"),
         person: str = Query("", description="Person name filter"),
@@ -795,7 +827,7 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     ):
         conn = get_conn()
         try:
-            photos = _run_search(conn, q, label, camera, person, cluster, country, k)
+            photos = _run_search(conn, q, label, camera, person, cluster, country, k, text)
 
             # Dropdowns for search form
             labels = [r[0] for r in conn.execute(
@@ -813,11 +845,11 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
 
             return TEMPLATES.TemplateResponse(request, "search.html", {
                 "photos": photos,
-                "q": q, "label": label, "camera": camera,
+                "q": q, "text": text, "label": label, "camera": camera,
                 "person": person, "cluster": cluster, "country": country,
                 "labels": labels, "cameras": cameras,
                 "people": people, "countries": countries,
-                "search_qs": _search_qs(q, label, camera, person, cluster, country, k),
+                "search_qs": _search_qs(q, label, camera, person, cluster, country, k, text),
             })
         finally:
             conn.close()

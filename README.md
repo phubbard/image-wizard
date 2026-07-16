@@ -7,6 +7,7 @@ locally, no cloud calls:
 - **YOLO 11** — object detection (80 COCO classes, MPS-accelerated)
 - **InsightFace** — face detection + 512-d ArcFace embeddings, clustered with HDBSCAN for iOS-style "People" albums
 - **OpenCLIP** — text-to-image search ("dog on a beach")
+- **Apple Vision** — on-device OCR of text in photos (signs, storefronts, book covers, screenshots), full-text searchable
 
 Videos (`.mov`, `.mp4`, `.m4v`) are indexed too — multiple frames are
 sampled (1 fps for the first 60s, then every 10s; capped at 600 per
@@ -166,6 +167,18 @@ image-wizard cluster-faces --full             # rebuild every cluster from scrat
 image-wizard cluster-faces --min-size 3       # tighter clusters (default: 3)
 ```
 
+### Text in photos (OCR)
+
+```bash
+# On-device OCR (Apple Vision) over each photo's thumbnail, indexed for
+# full-text search. macOS only. Incremental — only new photos each run.
+image-wizard ocr
+image-wizard ocr --redo                       # re-OCR everything
+image-wizard ocr --path '%/Screenshots/%'     # scope to a subtree
+# Then search from the web UI's "Text in photo" box, or:
+#   /search?text=cafe
+```
+
 ### Browse
 
 ```bash
@@ -249,7 +262,7 @@ position you left.
 | Page | What it does |
 |------|-------------|
 | **Timeline** (`/`) | Photos by date with year + multi-month subheaders. Videos get a ▶ duration badge; iPhone Live Photos show once with a concentric-circles "LIVE" badge (the .MOV companion is hidden). Ordering is stable by `(taken_at, id)`, so photos that share a date (common on scanned film with date-only timestamps) don't duplicate across infinite-scroll page boundaries or get skipped by prev/next. |
-| **Search** (`/search`) | Free-text CLIP search ("dog on a beach"), plus filter dropdowns for object label, camera, named person, unnamed face cluster, and country. Prev/Next on photo detail walks the search results. |
+| **Search** (`/search`) | Free-text CLIP search ("dog on a beach"), a separate **"Text in photo"** box that does full-text search over OCR'd text (Apple Vision — signs, storefronts, screenshots; supports FTS5 phrase/AND/OR/prefix syntax), plus filter dropdowns for object label, camera, named person, unnamed face cluster, and country. Prev/Next on photo detail walks the search results. |
 | **Photo detail** (`/photo/{id}`) | Full image with toggleable bounding boxes for objects (teal) and faces (yellow). Click a face box to name it inline. Rotate controls (↺ ↻ ⤢) fix images whose EXIF orientation is missing. The Pipeline section in the sidebar shows the four ML stage flags (✓/✗) so you can tell whether missing detections are a pipeline gap or a genuinely empty result. Decode failures are flagged in red with the recorded error. |
 
 **Rotating photos** (for old scans with no EXIF orientation): right-click
@@ -309,6 +322,7 @@ shift-click the last, everything between is selected.
 | Face clustering | HDBSCAN with stable cluster IDs (incremental) |
 | Person identity | Custom model — clusters → persons → name epochs over time |
 | Text search | OpenCLIP ViT-B/32 (laion2b) |
+| OCR | Apple Vision (VNRecognizeTextRequest) via PyObjC, indexed in SQLite FTS5 |
 | Reverse geocoding | reverse_geocoder (offline) |
 | Crash diagnostics | psutil (RSS sampling), faulthandler-to-file, append-only checkpoint log |
 | CLI | Typer |
@@ -330,6 +344,7 @@ imagewizard/
   cluster.py        HDBSCAN face clustering (incremental + full modes)
   persons.py        Person identity model + name epochs (date-aware names)
   search_cli.py     CLIP text search CLI
+  ocr.py            Apple Vision OCR (macOS)
   models/
     yolo.py         YOLO 11n (lazy singleton)
     faces.py        InsightFace buffalo_l (lazy singleton)

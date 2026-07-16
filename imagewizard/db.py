@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS face_clusters (
 -- Virtual tables for sqlite-vec. Keyed by rowid = files.id / faces.id.
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_clip  USING vec0(embedding float[512]);
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_faces USING vec0(embedding float[512]);
+
+-- Full-text index of OCR'd text (Apple Vision), rowid = files.id. Holds
+-- the text itself so it's both searchable (MATCH) and retrievable for
+-- display. Populated by `image-wizard ocr`.
+CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(text);
 
 -- Directories that have been passed to `scan`. Used by the About page.
 CREATE TABLE IF NOT EXISTS scan_roots (
@@ -342,6 +347,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_dup_of ON files(dup_of)"
         )
+
+    # ocr_done: per-file flag for the Apple Vision OCR stage, so
+    # `image-wizard ocr` is incremental like the ML stages. The FTS5
+    # index itself is created here too (idempotent) so connect-only
+    # CLIs / the web app see it without a full init().
+    _add_column(conn, "files", "ocr_done", "ocr_done INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(text)")
 
     # rotation: user-applied display rotation in degrees clockwise
     # (0/90/180/270), on top of whatever EXIF orientation already did at

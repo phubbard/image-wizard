@@ -274,7 +274,25 @@ def delete_file_row(conn, file_id: int) -> None:
         "SELECT id FROM faces WHERE file_id=?", (file_id,)
     ).fetchall():
         conn.execute("DELETE FROM vec_faces WHERE rowid=?", (fa[0],))
+    conn.execute("DELETE FROM ocr_fts WHERE rowid=?", (file_id,))
     conn.execute("DELETE FROM files WHERE id=?", (file_id,))
+
+
+def _flush_ocr(conn, pending: list) -> None:
+    """Write a batch of (file_id, text) OCR results to the FTS index.
+
+    FTS5 has no UPSERT, so we delete any prior row for the file first
+    (matters for --redo). Sets ocr_done=1 regardless of whether text was
+    found, so empty results aren't retried every run.
+    """
+    for fid, text in pending:
+        conn.execute("DELETE FROM ocr_fts WHERE rowid=?", (fid,))
+        if text and text.strip():
+            conn.execute(
+                "INSERT INTO ocr_fts (rowid, text) VALUES (?, ?)", (fid, text)
+            )
+        conn.execute("UPDATE files SET ocr_done=1 WHERE id=?", (fid,))
+    conn.commit()
 
 
 def compute_phashes(conn, cache_dir, console=None, workers: int = 4) -> int:
@@ -1603,6 +1621,12 @@ def register(parent: typer.Typer) -> None:
         phases.append(("cluster-faces", ["cluster-faces"],
                        phase("cluster-faces", ["cluster-faces"])))
 
+        # OCR (Apple Vision) — only if available on this box, so a
+        # non-macOS / no-pyobjc host doesn't fail the refresh.
+        from . import ocr as _ocr_mod
+        if _ocr_mod.available():
+            phases.append(("ocr", ["ocr"], phase("ocr", ["ocr"])))
+
         # Summary — silent on success, one line to stdout on failure so
         # cron mails it.
         failures = [name for name, _, rc in phases if rc != 0]
@@ -1846,6 +1870,100 @@ def register(parent: typer.Typer) -> None:
                 )
             console.print(
                 f"[green]marked {len(gone)} row(s) as missing[/green]"
+            )
+        finally:
+            conn.close()
+
+    @parent.command(name="ocr")
+    def cmd_ocr(
+        workers: int = typer.Option(
+            4, "--workers", "-w", help="Parallel OCR threads."
+        ),
+        limit: int = typer.Option(
+            0, "--limit", help="Stop after this many files (0 = all)."
+        ),
+        redo: bool = typer.Option(
+            False, "--redo", help="Re-OCR files already processed."
+        ),
+        path_glob: str = typer.Option(
+            "", "--path", help="Only OCR files matching this LIKE pattern."
+        ),
+    ) -> None:
+        """Recognize text in photos with Apple Vision, for full-text search.
+
+        On-device OCR (no cloud) over each photo's cached thumbnail —
+        street signs, storefronts, book covers, whiteboards, screenshots.
+        The text goes into an FTS5 index; search it from the web UI's
+        "text in photo" box. Incremental: only un-OCR'd files are done
+        unless --redo. macOS only (needs the Vision framework).
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from .thumbs import thumb_path
+        from . import ocr as ocr_mod
+
+        console = Console()
+        if not ocr_mod.available():
+            console.print(
+                "[red]Apple Vision OCR unavailable[/red] — needs macOS + "
+                "`uv pip install pyobjc-framework-Vision pyobjc-framework-Quartz`."
+            )
+            raise typer.Exit(1)
+
+        cfg = config.load()
+        db.init(cfg.db_path)
+        conn = db.connect(cfg.db_path)
+        try:
+            where = ["missing=0", "too_small=0", "decode_failed=0",
+                     "dup_of IS NULL", "content_hash != ''"]
+            params: list = []
+            if not redo:
+                where.append("ocr_done=0")
+            if path_glob:
+                where.append("path LIKE ?")
+                params.append(path_glob)
+            rows = conn.execute(
+                f"SELECT id, content_hash FROM files WHERE {' AND '.join(where)}",
+                params,
+            ).fetchall()
+            if limit:
+                rows = rows[:limit]
+            if not rows:
+                console.print("[green]nothing to OCR[/green]")
+                return
+            console.print(f"[dim]OCR over {len(rows)} photo(s)…[/dim]")
+
+            def ocr_one(r):
+                tp = thumb_path(cfg.cache_dir, r["content_hash"])
+                if not tp.exists():
+                    return (r["id"], None)
+                return (r["id"], ocr_mod.recognize_text(tp))
+
+            done = with_text = 0
+            pending: list[tuple[int, str]] = []
+            from rich.progress import (
+                Progress, BarColumn, MofNCompleteColumn, SpinnerColumn,
+                TimeRemainingColumn,
+            )
+            with ThreadPoolExecutor(max_workers=workers) as pool, \
+                    Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                             TimeRemainingColumn(), console=Console(stderr=True)) as prog:
+                task = prog.add_task("ocr", total=len(rows))
+                futs = {pool.submit(ocr_one, r): r for r in rows}
+                for fut in as_completed(futs):
+                    fid, text = fut.result()
+                    if text is not None:
+                        pending.append((fid, text))
+                        if text.strip():
+                            with_text += 1
+                    done += 1
+                    prog.advance(task)
+                    if len(pending) >= 200:
+                        _flush_ocr(conn, pending)
+                        pending = []
+            if pending:
+                _flush_ocr(conn, pending)
+            console.print(
+                f"[green]OCR'd {done} photos[/green]; {with_text} contained text."
             )
         finally:
             conn.close()

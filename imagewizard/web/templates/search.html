@@ -4,8 +4,12 @@
 <h1>Search</h1>
 <form method="get" action="/search" style="display:flex;flex-wrap:wrap;gap:0.8rem;align-items:end;margin-bottom:1rem;">
     <div>
-        <label for="q">Text (CLIP)</label>
-        <input type="text" id="q" name="q" value="{{ q }}" placeholder="dog on a beach" style="width:250px;">
+        <label for="q">Describe (CLIP)</label>
+        <input type="text" id="q" name="q" value="{{ q }}" placeholder="dog on a beach" style="width:230px;">
+    </div>
+    <div>
+        <label for="text">Text in photo (OCR)</label>
+        <input type="text" id="text" name="text" value="{{ text }}" placeholder="street sign, storefront…" style="width:230px;">
     </div>
     <div>
         <label for="label">Object</label>
