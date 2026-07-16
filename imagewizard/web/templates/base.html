@@ -218,6 +218,11 @@
         <a href="/faces">Faces</a>
         <a href="/map">Map</a>
         <a href="/about">About</a>
+        {% set _rot = pending_rotations() if pending_rotations else 0 %}
+        {% if _rot %}
+        <a href="/rotations" title="Photos the orientation model thinks are sideways">
+            ⟳ {{ _rot }}</a>
+        {% endif %}
         {% if filter_badge and filter_badge() %}
         <a href="/about" title="A subset of scanned directories is active. Click to manage."
            style="margin-left:auto;background:var(--highlight);color:#fff;padding:2px 10px;border-radius:12px;font-size:0.75rem;">

@@ -66,6 +66,21 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             c.close()
     TEMPLATES.env.globals["filter_badge"] = _filter_active
 
+    def _pending_rotations() -> int:
+        """Count of photos with an unreviewed rotation suggestion, for the
+        nav badge. Cheap (indexed-ish scan on a small subset)."""
+        c = db.connect(cfg.db_path)
+        try:
+            return c.execute(
+                "SELECT COUNT(*) FROM files WHERE rotation_suggested IS NOT NULL "
+                "AND rotation = 0 AND missing = 0"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0  # pre-migration DB
+        finally:
+            c.close()
+    TEMPLATES.env.globals["pending_rotations"] = _pending_rotations
+
     # ---- Routes ----
 
     # ------------------------------------------------------------------
@@ -1100,6 +1115,73 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
                 "UPDATE files SET rotation=? WHERE id=?", (new_rot, file_id)
             )
             return {"rotation": new_rot}
+        finally:
+            conn.close()
+
+    @app.post("/photo/{file_id}/rotate-accept")
+    async def rotate_accept(file_id: int):
+        """Accept the orientation model's suggested rotation for a photo.
+
+        Copies rotation_suggested into rotation (so it's baked into the
+        served pixels via /full + /thumb?rot=, exactly like a manual
+        rotation) and clears the suggestion. Returns {"rotation": N}.
+        """
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT rotation_suggested FROM files WHERE id=?", (file_id,)
+            ).fetchone()
+            if not row or row["rotation_suggested"] is None:
+                return HTMLResponse("no suggestion", 404)
+            rot = int(row["rotation_suggested"]) % 360
+            conn.execute(
+                "UPDATE files SET rotation=?, rotation_suggested=NULL, "
+                "rotation_suggested_conf=NULL WHERE id=?", (rot, file_id))
+            return {"rotation": rot}
+        finally:
+            conn.close()
+
+    @app.post("/photo/{file_id}/rotate-dismiss")
+    async def rotate_dismiss(file_id: int):
+        """Dismiss a rotation suggestion (leave the photo as-is).
+
+        Clears the suggestion but keeps rotation_checked=1 so a re-scan
+        won't re-suggest it (unless run with --redo)."""
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE files SET rotation_suggested=NULL, "
+                "rotation_suggested_conf=NULL WHERE id=?", (file_id,))
+            return {"ok": True}
+        finally:
+            conn.close()
+
+    @app.get("/rotations", response_class=HTMLResponse)
+    async def rotations_page(request: Request):
+        """Review queue for orientation-model suggestions.
+
+        Shows photos the model flagged as stored sideways, most-confident
+        first, each previewed with the suggested correction applied. Accept
+        bakes the rotation in; dismiss leaves it. Empty state explains how
+        to populate it (train-orientation → suggest-rotations)."""
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT id, content_hash, rotation_suggested,
+                          rotation_suggested_conf
+                   FROM files
+                   WHERE rotation_suggested IS NOT NULL AND rotation = 0
+                     AND missing = 0
+                   ORDER BY rotation_suggested_conf DESC
+                   LIMIT 200"""
+            ).fetchall()
+            total = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE rotation_suggested IS NOT NULL "
+                "AND rotation = 0 AND missing = 0"
+            ).fetchone()[0]
+            return TEMPLATES.TemplateResponse(request, "rotations.html", {
+                "photos": rows, "total": total,
+            })
         finally:
             conn.close()
 

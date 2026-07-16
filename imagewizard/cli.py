@@ -122,6 +122,7 @@ for _m in (
     "imagewizard.pipeline",
     "imagewizard.cluster",
     "imagewizard.search_cli",
+    "imagewizard.orient_cli",
     "imagewizard.web.app",
 ):
     _try_register(_m)

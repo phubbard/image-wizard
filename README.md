@@ -179,6 +179,34 @@ image-wizard ocr --path '%/Screenshots/%'     # scope to a subtree
 #   /search?text=cafe
 ```
 
+### Suggest rotations (orientation model)
+
+For old photos whose camera wrote no EXIF orientation (they're stored
+sideways with nothing to correct them), a small on-device CNN can guess the
+right rotation. It's trained self-supervised on your own library — the
+correctly-oriented majority, rotated to all four orientations — so it learns
+what "upright" looks like (sky up, faces up, horizons level). Needs
+GPU/MPS. Suggestions are **reviewed, never auto-applied**.
+
+```bash
+# 1. Train the model on your library (once; a few minutes on Apple Silicon).
+image-wizard train-orientation
+image-wizard train-orientation --samples 5000 --epochs 8   # more data/epochs
+
+# 2. Scan photos and record suggestions for the ones stored sideways.
+#    Content-based, so it catches any orientation-blind camera, not just one.
+image-wizard suggest-rotations                     # all un-rotated photos
+image-wizard suggest-rotations --min-conf 0.95     # fewer, safer suggestions
+image-wizard suggest-rotations --camera "PowerShot S100"   # scope to a model
+
+# 3. Review + one-click accept at /rotations in the web UI (a nav badge shows
+#    the pending count). Accepting bakes the rotation in like a manual one.
+```
+
+Validated at ~93% precision / ~69% recall on high-confidence suggestions —
+it flags the confident cases and leaves the ambiguous ones alone. Re-run
+`suggest-rotations --redo` after retraining.
+
 ### Browse
 
 ```bash
@@ -328,7 +356,10 @@ another app reflect the rotation (a display-only CSS transform never
 survives the clipboard). Still non-destructive: the original file and the
 base cached thumbnail are never re-encoded — rotated variants are cached
 separately (`thumbs/…rN.jpg`, `full_rot/…rN.jpg`) and regenerated on
-demand, so the rotation stays instant and reversible.
+demand, so the rotation stays instant and reversible. For bulk fixes, the
+[orientation model](#suggest-rotations-orientation-model) can suggest
+rotations for review at **`/rotations`**.
+| **Rotations** (`/rotations`) | Review queue for the orientation model's suggestions (populated by `suggest-rotations`). Photos it thinks are stored sideways, most-confident first, each previewed with the correction applied — accept (bakes it in) or dismiss. A nav badge shows the pending count. Nothing is auto-applied. |
 | **Person** (`/person/{name}`) | Per-person timeline. Aggregates every face cluster sharing this identity (handles multi-cluster + multi-name same-person cases). Shows a "through the years" face strip and a "names through time" editor for adding name epochs (`Amy Bee` until 2012-07-01, `Amy Smith` after) — caption text on each photo uses the era-appropriate name. |
 | **Faces** (`/faces`) | Grid of face clusters with autocomplete naming. Typing an existing name auto-merges clusters. Multi-select for explicit merges. Pagination via infinite scroll. A banner links to the labelling flow when clusters are unnamed. |
 | **Label faces** (`/faces/label`) | Streamlined one-at-a-time "who is this?" review. Shows the largest unnamed cluster as a strip of cropped face thumbnails (`/face-crop/{id}` crops the bbox out of the photo thumbnail), you type a name (autocomplete + auto-merge, same as the grid), and it advances to the next cluster. "Not a person" hides junk clusters (partial faces, false detections) so they don't reappear. Biggest clusters first, for maximum coverage per keystroke. |
@@ -410,10 +441,13 @@ imagewizard/
   persons.py        Person identity model + name epochs (date-aware names)
   search_cli.py     CLIP text search CLI
   ocr.py            Apple Vision OCR (macOS)
+  datefind.py       Infer capture date from folder/filename patterns
+  orient_cli.py     train-orientation + suggest-rotations CLIs
   models/
     yolo.py         YOLO 11n (lazy singleton)
     faces.py        InsightFace buffalo_l (lazy singleton)
     clip.py         OpenCLIP ViT-B/32 (lazy singleton)
+    orientation.py  Self-supervised 4-class orientation CNN (ResNet-18)
   web/
     app.py          FastAPI application
     log_filter.py   Uvicorn log filter (drops unhelpful "Invalid HTTP" warnings)

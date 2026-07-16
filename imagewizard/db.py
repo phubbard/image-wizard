@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -373,6 +373,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn, "photo_meta", "date_inferred",
         "date_inferred INTEGER NOT NULL DEFAULT 0"
     )
+
+    # Orientation-model suggestions (see `suggest-rotations`). The CNN
+    # predicts a clockwise correction for photos whose camera wrote no EXIF
+    # orientation. rotation_checked=1 once a photo has been scanned (so we
+    # don't re-run it); rotation_suggested holds the suggested degrees CW
+    # (90/180/270) only when the model is confident it's non-upright;
+    # rotation_suggested_conf is the softmax probability, for ranking.
+    _add_column(conn, "files", "rotation_checked",
+                "rotation_checked INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "files", "rotation_suggested", "rotation_suggested INTEGER")
+    _add_column(conn, "files", "rotation_suggested_conf",
+                "rotation_suggested_conf REAL")
 
 
 def _backfill_persons(conn: sqlite3.Connection) -> None:
