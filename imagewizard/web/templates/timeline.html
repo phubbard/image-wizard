@@ -59,6 +59,7 @@
     .select-bar.show { display: flex; }
     .select-bar .count { font-weight: 600; }
     .select-bar .cancel { background: var(--accent); }
+    .select-bar .hint { margin-left: auto; color: var(--muted); font-size: 0.75rem; }
 </style>
 {% endblock %}
 {% block content %}
@@ -67,13 +68,15 @@
     {% if selected_months %}
     · {{ selected_months|length }} month{{ 's' if selected_months|length != 1 else '' }}
     {% endif %}
-    <button class="select-toggle" id="select-toggle">Select</button>
+    <button class="select-toggle" id="select-toggle"
+            title="Select photos for batch geotagging — or just Shift-click any photo">Select</button>
 </div>
 
 <div class="select-bar" id="select-bar">
     <span class="count" id="select-count">0 selected</span>
     <button id="geotag-selected">📍 Geotag selected</button>
     <button class="cancel" id="select-cancel">Cancel</button>
+    <span class="hint">Shift-click a photo to select a range · Esc to exit</span>
 </div>
 {% if years %}
 <div class="year-nav">
@@ -127,10 +130,21 @@ if (history.scrollRestoration) history.scrollRestoration = 'auto';
         document.getElementById('geotag-selected').disabled = selected.size === 0;
     }
     function setMode(on) {
+        // Toggling the in-flow sticky action bar inserts/removes its height
+        // at the top of the content. When the user is scrolled down (e.g.
+        // they Shift-clicked a photo far from the top), that would shove
+        // everything under the viewport up or down — so measure the layout
+        // delta and compensate to keep the photos visually stationary.
+        const h0 = document.documentElement.scrollHeight;
+        const scrolled = window.scrollY > 0;
         document.body.classList.toggle('selecting', on);
         bar.classList.toggle('show', on);
         toggle.classList.toggle('on', on);
         toggle.textContent = on ? 'Done' : 'Select';
+        if (scrolled) {
+            const delta = document.documentElement.scrollHeight - h0;
+            if (delta) window.scrollBy(0, delta);
+        }
         if (!on) {
             selected.clear();
             grid.querySelectorAll('a.selected').forEach(a => a.classList.remove('selected'));
@@ -150,16 +164,32 @@ if (history.scrollRestoration) history.scrollRestoration = 'auto';
         else { selected.delete(a.dataset.photoId); a.classList.remove('selected'); }
     }
 
-    // In select mode, clicking a thumbnail toggles selection instead of
-    // navigating. Shift-click selects the whole range from the anchor to
-    // the clicked thumbnail (in grid order), like the Finder. Delegated
-    // so htmx-appended thumbnails work too.
+    // Clicking a thumbnail:
+    //  · Not in select mode + Shift-click → enter select mode and select
+    //    this photo. Lets you start a multiselect from anywhere in the
+    //    timeline without scrolling back up to the Select button.
+    //  · In select mode, a plain click toggles selection; Shift-click
+    //    selects the whole range from the anchor (in grid order), Finder-
+    //    style.
+    // Delegated so htmx-appended thumbnails work too.
     grid.addEventListener('click', (e) => {
-        if (!document.body.classList.contains('selecting')) return;
         const a = e.target.closest('a[data-photo-id]');
         if (!a) return;
-        e.preventDefault();
 
+        if (!document.body.classList.contains('selecting')) {
+            if (!e.shiftKey) return;   // normal browsing click → navigate
+            e.preventDefault();
+            // Shift on a link would otherwise open a new window and smear
+            // a text selection across the grid; suppress both.
+            window.getSelection().removeAllRanges();
+            setMode(true);
+            setSel(a, true);
+            anchor = a;
+            refresh();
+            return;
+        }
+
+        e.preventDefault();
         if (e.shiftKey && anchor && anchor !== a) {
             const all = Array.from(grid.querySelectorAll('a[data-photo-id]'));
             let i = all.indexOf(anchor), j = all.indexOf(a);
@@ -174,6 +204,13 @@ if (history.scrollRestoration) history.scrollRestoration = 'auto';
             anchor = a;
         }
         refresh();
+    });
+
+    // Esc leaves select mode from anywhere on the page.
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && document.body.classList.contains('selecting')) {
+            setMode(false);
+        }
     });
 
     document.getElementById('geotag-selected').addEventListener('click', () => {

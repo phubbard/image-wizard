@@ -286,9 +286,13 @@ demand, so the rotation stays instant and reversible.
 **Batch geotagging from the timeline**: click **Select** on the timeline,
 tap the photos that belong to one place, then **📍 Geotag selected** —
 one map click (or place search) tags the whole set. Good for a roll of
-film or a day trip that shares a location. **Shift-click** selects a
-whole range between two thumbnails, Finder-style — click the first,
-shift-click the last, everything between is selected.
+film or a day trip that shares a location. You don't have to scroll back
+to the toolbar to begin: **Shift-click any photo to jump straight into
+select mode** (it becomes the first selection), no matter how far down
+the timeline you are — the page stays put and the action bar pins to the
+top. Once selecting, **Shift-click** also selects a whole range between
+two thumbnails, Finder-style — click the first, shift-click the last,
+everything between is selected. **Esc** leaves select mode.
 | **Nearby** (`/nearby?lat=&lon=&radius_km=`) | Photos within a chosen radius of any GPS-tagged photo (click the GPS row on a photo detail to launch a radius prompt). Sorted by distance. |
 | **About** (`/about`) | Library stats, scan timestamps, **directory multi-select**: check / uncheck which scanned roots are visible across Timeline / Search / Map / Nearby. The selection persists in the DB. A `⌖ filtered` pill appears in the nav of every page when a strict subset is active. |
 
