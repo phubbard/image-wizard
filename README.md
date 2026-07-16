@@ -246,6 +246,19 @@ photo library — `Previews/`, `Thumbnails/`, `resources/`, etc. — and keeps
 *previous* scan indexed before that exclusion applied (e.g. the `Previews/`
 skip, added after some libraries were already indexed).
 
+```bash
+# Recover capture dates for old photos with no EXIF DateTimeOriginal, so
+# they land in the right place in the timeline instead of sitting undated.
+# Infers the date from YYYY/MM/DD folder paths, spelled-out event folders
+# ("August 4, 2005"), or filename patterns (IMG_20040825_143000). Only
+# touches files that already went through metadata extraction and have no
+# date; never overwrites a real EXIF date; marks its guesses date_inferred=1.
+image-wizard backfill-dates                       # dry run — see what it'd set
+image-wizard backfill-dates --apply               # write them
+image-wizard backfill-dates --path photoslibrary  # limit to one tree
+image-wizard backfill-dates --redo --apply        # re-infer its own guesses
+```
+
 ### Maintenance & repair
 
 ```bash

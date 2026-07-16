@@ -26,7 +26,7 @@ from typing import Iterator
 
 import sqlite_vec
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -363,6 +363,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # EXIF orientation tag is missing.
     _add_column(
         conn, "files", "rotation", "rotation INTEGER NOT NULL DEFAULT 0"
+    )
+
+    # date_inferred: 1 when photo_meta.taken_at was filled by `backfill-dates`
+    # from a folder/filename date pattern rather than read from EXIF. Lets the
+    # UI flag guessed dates and lets backfill re-run over only its own guesses
+    # (never overwriting a real EXIF date).
+    _add_column(
+        conn, "photo_meta", "date_inferred",
+        "date_inferred INTEGER NOT NULL DEFAULT 0"
     )
 
 

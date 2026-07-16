@@ -2730,3 +2730,115 @@ def register(parent: typer.Typer) -> None:
             )
         finally:
             conn.close()
+
+    @parent.command(name="backfill-dates")
+    def cmd_backfill_dates(
+        apply: bool = typer.Option(
+            False, "--apply",
+            help="Write the inferred dates (default is a dry run)."),
+        redo: bool = typer.Option(
+            False, "--redo",
+            help="Also re-infer dates a previous backfill set "
+                 "(date_inferred=1), e.g. after improving the patterns."),
+        path: str = typer.Option(
+            "", "--path",
+            help="Only consider files whose path contains this substring."),
+        show: int = typer.Option(
+            15, "--show", help="How many example rows to print."),
+    ) -> None:
+        """Infer taken_at from folder/filename dates where EXIF has none.
+
+        Old scans and early-digital photos often carry no EXIF capture
+        date, so they sit undated (mis-sorted) in the timeline — even
+        though the library filed them under `2004/10/25/` or an event
+        folder like "August 4, 2005", or the camera stamped the date into
+        the filename (`IMG_20040825_143000.jpg`). This recovers that date
+        into `photo_meta.taken_at` and marks it `date_inferred=1` so it's
+        distinguishable from a real EXIF date and never overwrites one.
+
+        Dry-run by default; pass --apply to write.
+        """
+        from . import datefind
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            # meta_done=1: only files that already went through EXIF
+            # extraction and genuinely have no date — never pre-empt a file
+            # whose metadata stage just hasn't run yet (it'll get a real date).
+            where = ["f.missing = 0", "f.meta_done = 1"]
+            params: list = []
+            if redo:
+                where.append("(pm.taken_at IS NULL OR pm.date_inferred = 1)")
+            else:
+                where.append("pm.taken_at IS NULL")
+            if path:
+                where.append("f.path LIKE ?")
+                params.append(f"%{path}%")
+            rows = conn.execute(
+                f"""SELECT f.id, f.path FROM files f
+                    LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE {' AND '.join(where)}""",
+                params,
+            ).fetchall()
+
+            inferred: list[tuple[int, str]] = []
+            misses = 0
+            from collections import Counter
+            by_year: Counter = Counter()
+            for r in rows:
+                d = datefind.infer_date(r["path"])
+                if d:
+                    inferred.append((r["id"], d))
+                    by_year[d[:4]] += 1
+                else:
+                    misses += 1
+
+            console.print(
+                f"[bold]{len(rows)} undated file(s)[/bold]; "
+                f"[green]{len(inferred)} inferable[/green], "
+                f"[yellow]{misses} not[/yellow]"
+            )
+            if by_year:
+                span = ", ".join(f"{y}:{n}" for y, n in sorted(by_year.items()))
+                console.print(f"  by inferred year → {span}")
+            for fid, d in inferred[:show]:
+                p = next(r["path"] for r in rows if r["id"] == fid)
+                console.print(f"  [cyan]{d[:10]}[/cyan]  {p}")
+            if len(inferred) > show:
+                console.print(f"  ... and {len(inferred) - show} more")
+
+            if not apply:
+                console.print("[yellow]dry run[/yellow] — pass --apply to write "
+                              "these into photo_meta.taken_at")
+                return
+            if not inferred:
+                return
+
+            from rich.progress import Progress, BarColumn, MofNCompleteColumn, SpinnerColumn
+            n = 0
+            with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                          console=Console(stderr=True)) as prog:
+                task = prog.add_task("writing", total=len(inferred))
+                for fid, d in inferred:
+                    # Upsert: many files already have a photo_meta row (with
+                    # NULL taken_at); some have none. Never touch a real date
+                    # — the candidate set is taken_at IS NULL (or --redo's own
+                    # prior guesses).
+                    conn.execute(
+                        """INSERT INTO photo_meta (file_id, taken_at, date_inferred)
+                           VALUES (?, ?, 1)
+                           ON CONFLICT(file_id) DO UPDATE SET
+                             taken_at = excluded.taken_at, date_inferred = 1""",
+                        (fid, d),
+                    )
+                    conn.execute("UPDATE files SET meta_done = 1 WHERE id = ?", (fid,))
+                    n += 1
+                    if n % 500 == 0:
+                        conn.commit()
+                    prog.advance(task)
+            conn.commit()
+            console.print(f"[green]backfilled {n} date(s)[/green] "
+                          "(marked date_inferred=1)")
+        finally:
+            conn.close()
