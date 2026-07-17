@@ -412,6 +412,37 @@ def discover(roots: list[Path]) -> Iterator[Path]:
         yield from _walk_one_root(root)
 
 
+def _root_reachable(root: Path, timeout: float = 8.0) -> bool:
+    """True if *root*'s directory answers a listing within *timeout* seconds.
+
+    A network mount (SMB/NFS) that has dropped or gone to sleep makes
+    ``os.walk`` block forever in a kernel wait — which wedges the whole
+    scan and, through ``refresh``, holds the run lock until someone kills
+    it by hand. Probe the top-level read in a daemon thread and give up
+    after *timeout*; an unreachable root is then skipped rather than hung
+    on. The abandoned probe thread can't be killed, but it holds nothing up
+    and dies with the process. A healthy local/mounted dir answers in
+    milliseconds, so this adds no meaningful cost to normal scans.
+    """
+    done = threading.Event()
+    ok = [False]
+
+    def _probe() -> None:
+        try:
+            with os.scandir(root) as it:
+                next(it, None)   # forces the first real directory read
+            ok[0] = True
+        except OSError:
+            ok[0] = False
+        finally:
+            done.set()
+
+    threading.Thread(target=_probe, daemon=True).start()
+    if not done.wait(timeout):
+        return False   # timed out → treat as unreachable
+    return ok[0]
+
+
 def scan(
     roots: list[Path],
     conn: "db.sqlite3.Connection",
@@ -444,7 +475,7 @@ def scan(
         "new": 0, "changed": 0, "unchanged": 0, "missing": 0,
         "errors": 0, "skipped_small": 0,
         "dedup_skipped": 0, "moved": 0,
-        "live_photo_pairs": 0,
+        "live_photo_pairs": 0, "roots_skipped": 0,
     }
 
     # Record the scan roots so the About page can show what's been indexed.
@@ -481,8 +512,18 @@ def scan(
     path_q: queue.Queue = queue.Queue(maxsize=10_000)
     SENTINEL = (None, None)
 
+    # Roots that didn't answer a reachability probe (dropped network mount).
+    # Skipped rather than hung on; tracked so --prune doesn't tombstone
+    # their files as "missing" just because the volume is offline.
+    skipped_roots: set[str] = set()
+    skipped_lock = threading.Lock()
+
     def walker(root_idx: int, root: Path) -> None:
         try:
+            if not _root_reachable(root):
+                with skipped_lock:
+                    skipped_roots.add(str(root.expanduser().resolve()))
+                return  # the finally still emits the per-root done marker
             for p in _walk_one_root(root):
                 path_q.put((root_idx, p))
         except Exception as e:
@@ -531,11 +572,21 @@ def scan(
                     # Walker for this root finished.
                     active -= 1
                     per_root_done[root_idx] = True
-                    prog.update(
-                        per_root[root_idx],
-                        description=f"  ✓ {_short(roots[root_idx])} "
-                                    f"({per_root_count[root_idx]} files)",
-                    )
+                    rp = str(roots[root_idx].expanduser().resolve())
+                    with skipped_lock:
+                        was_skipped = rp in skipped_roots
+                    if was_skipped:
+                        prog.update(
+                            per_root[root_idx],
+                            description=f"  ⚠ {_short(roots[root_idx])} "
+                                        "(unreachable — skipped)",
+                        )
+                    else:
+                        prog.update(
+                            per_root[root_idx],
+                            description=f"  ✓ {_short(roots[root_idx])} "
+                                        f"({per_root_count[root_idx]} files)",
+                        )
                     continue
                 if isinstance(payload, Exception):
                     stats["errors"] += 1
@@ -583,6 +634,13 @@ def scan(
         finally:
             pool.shutdown(wait=True)
 
+    stats["roots_skipped"] = len(skipped_roots)
+    for sr in sorted(skipped_roots):
+        console.print(
+            f"[yellow]⚠ root unreachable this scan, skipped: {sr}[/yellow] "
+            "(its files were left untouched)"
+        )
+
     if prune:
         existing_paths = {
             r[0] for r in conn.execute(
@@ -590,6 +648,13 @@ def scan(
             ).fetchall()
         }
         gone = existing_paths - paths_seen
+        # Never tombstone files under a root we couldn't reach — the volume
+        # is offline, the files aren't deleted. (Without this, a dropped NAS
+        # would mark its whole library missing on the next --prune scan.)
+        if skipped_roots:
+            prefixes = tuple(sr.rstrip("/") + "/" for sr in skipped_roots)
+            gone = {p for p in gone
+                    if p not in skipped_roots and not p.startswith(prefixes)}
         for p in gone:
             conn.execute("UPDATE files SET missing=1 WHERE path=?", (p,))
         stats["missing"] = len(gone)

@@ -98,9 +98,13 @@ image-wizard scan ~/A /Volumes/B --walk-workers 16
                                               # paths are deduped per scan.
 
 # Re-scan every directory you've ever scanned (reads the scan_roots
-# table — no need to retype paths). Skips unmounted roots so an
-# offline volume doesn't false-positive --prune. Per-root progress
-# bars show which mount is the current bottleneck.
+# table — no need to retype paths). Each root is first probed for
+# reachability with a timeout, so a dropped / asleep SMB/NFS mount is
+# SKIPPED (with a warning) instead of hanging os.walk forever — which
+# would otherwise wedge the scan and hold the refresh lock until killed
+# by hand. A skipped root's files are left untouched (never tombstoned by
+# --prune just because the volume is offline). Per-root progress bars show
+# which mount is the current bottleneck.
 image-wizard rescan
 image-wizard rescan --no-prune                # don't tombstone missing files
 image-wizard rescan --walk-workers 16         # raise concurrency for NAS
