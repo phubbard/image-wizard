@@ -3096,3 +3096,168 @@ def register(parent: typer.Typer) -> None:
                           "(marked date_inferred=1)")
         finally:
             conn.close()
+
+    @parent.command(name="collate")
+    def cmd_collate(
+        target: str = typer.Argument(
+            ..., help="Destination for the consolidated tree, e.g. "
+                      "/Volumes/2TBSSD/photos"),
+        apply: bool = typer.Option(
+            False, "--apply", help="Actually copy (default is a dry run)."),
+        workers: int = typer.Option(
+            4, "--workers", "-w",
+            help="Parallel copy workers (hides per-file SMB latency)."),
+        undated: str = typer.Option(
+            "undated", "--undated",
+            help="Subdir for files with no usable capture date."),
+        repoint: bool = typer.Option(
+            True, "--repoint/--no-repoint",
+            help="Update files.path to the new location after copying, so "
+                 "the index (and all its thumbnails / ML work) follows the "
+                 "consolidated tree."),
+        limit: int = typer.Option(
+            0, "--limit", help="Cap files processed (0 = all), for testing."),
+    ) -> None:
+        """Collate the deduplicated library into one date-organized tree.
+
+        Copies every *visible* file (dup_of IS NULL, not missing — i.e. the
+        one best copy per photo the dedup passes already chose) into
+        ``<target>/YYYY/MM/DD/<name>`` (undated → ``<target>/<undated>/``).
+        The bytes are copied unchanged, so each file's content_hash is
+        identical and --repoint just updates files.path — every thumbnail,
+        embedding, face and OCR row stays valid, nothing recomputes.
+
+        Non-destructive (source files are never touched), resumable (skips
+        files already present at the target), and integrity-checked (the
+        copy's hash is re-verified before it counts). Dry-run by default.
+
+        After it finishes you can drop the source (NAS) roots from
+        scan_roots so `refresh` only ever walks the fast local tree.
+        """
+        import os as _os
+        import shutil
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        target_root = Path(target).expanduser()
+        try:
+            rows = conn.execute(
+                """SELECT f.id, f.path, f.content_hash, f.size, pm.taken_at
+                   FROM files f LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                   WHERE f.dup_of IS NULL AND f.missing = 0
+                     AND f.content_hash != ''
+                   ORDER BY f.id"""
+            ).fetchall()
+            if limit:
+                rows = rows[:limit]
+
+            def _datedir(taken):
+                if (taken and len(taken) >= 10
+                        and taken[4] == "-" and taken[7] == "-"):
+                    return f"{taken[:4]}/{taken[5:7]}/{taken[8:10]}"
+                return undated
+
+            # Collision groups: different photos that would land at the same
+            # date/filename. Every file in such a group gets a short
+            # content-hash suffix so nothing overwrites anything. Computed
+            # from the full set → deterministic + resumable.
+            groups: dict = defaultdict(set)
+            for r in rows:
+                key = (_datedir(r["taken_at"]),
+                       _os.path.basename(r["path"]).lower())
+                groups[key].add(r["content_hash"])
+
+            def _target_for(r):
+                dd = _datedir(r["taken_at"])
+                base = _os.path.basename(r["path"])
+                if len(groups[(dd, base.lower())]) > 1:
+                    stem, ext = _os.path.splitext(base)
+                    base = f"{stem}-{r['content_hash'][:8]}{ext}"
+                return target_root / dd / base
+
+            total_bytes = sum(r["size"] or 0 for r in rows)
+            undated_ct = sum(1 for r in rows
+                             if _datedir(r["taken_at"]) == undated)
+            collide_groups = sum(1 for hs in groups.values() if len(hs) > 1)
+
+            console.print(
+                f"[bold]{len(rows)} files[/bold], "
+                f"{total_bytes/1e9:.1f} GB → {target_root}")
+            console.print(
+                f"  {len(rows) - undated_ct} dated (YYYY/MM/DD), "
+                f"{undated_ct} undated → {undated}/, "
+                f"{collide_groups} name+date collisions (hash-suffixed)")
+            console.print("[dim]examples:[/dim]")
+            for r in rows[:5]:
+                console.print(f"  {r['path']}")
+                console.print(f"    [cyan]→ {_target_for(r)}[/cyan]")
+
+            if not apply:
+                console.print("\n[yellow]dry run[/yellow] — pass --apply to "
+                              "copy. Nothing on the source is ever modified.")
+                return
+
+            def _copy_one(r):
+                dst = _target_for(r)
+                if dst.exists() and dst.stat().st_size == (r["size"] or -1):
+                    return (r["id"], str(dst), "skip")   # already collated
+                src = Path(r["path"])
+                if not src.exists():
+                    return (r["id"], None, "source-missing")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dst.with_name(dst.name + ".part")
+                try:
+                    shutil.copy2(src, tmp)
+                    if content_hash(tmp) != r["content_hash"]:
+                        tmp.unlink(missing_ok=True)
+                        return (r["id"], None, "hash-mismatch")
+                    _os.replace(tmp, dst)
+                    return (r["id"], str(dst), "copied")
+                except OSError as e:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return (r["id"], None, f"error: {e}")
+
+            copied = skipped = errors = 0
+            from rich.progress import (Progress, BarColumn, MofNCompleteColumn,
+                                       SpinnerColumn, TimeRemainingColumn)
+            with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                          TimeRemainingColumn(),
+                          console=Console(stderr=True)) as prog, \
+                    ThreadPoolExecutor(max_workers=workers) as ex:
+                task = prog.add_task("collate", total=len(rows))
+                futs = [ex.submit(_copy_one, r) for r in rows]
+                n = 0
+                for fut in as_completed(futs):
+                    fid, dst, status = fut.result()
+                    if status == "copied" or status == "skip":
+                        copied += status == "copied"
+                        skipped += status == "skip"
+                        if repoint and dst:
+                            conn.execute(
+                                "UPDATE files SET path=? WHERE id=?", (dst, fid))
+                    else:
+                        errors += 1
+                        console.print(f"  [red]{status}[/red] (id {fid})")
+                    n += 1
+                    if n % 500 == 0:
+                        conn.commit()
+                    prog.advance(task)
+                conn.commit()
+
+            console.print(
+                f"\n[green]copied {copied}[/green], "
+                f"skipped {skipped} (already present), errors {errors}")
+            if repoint:
+                console.print("[green]re-pointed the index[/green] to the "
+                              "consolidated tree (thumbnails + ML preserved).")
+            console.print(
+                "Next: once you're happy, drop the source roots from "
+                "scan_roots so `refresh` only walks the local tree.")
+        finally:
+            conn.close()
