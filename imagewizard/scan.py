@@ -1841,6 +1841,22 @@ def register(parent: typer.Typer) -> None:
             phases.append(("find-duplicates-near", nd_args,
                            phase("find-duplicates-near", nd_args)))
 
+        # Consolidate newly-ingested photos into the local canonical tree,
+        # if one has been configured (app_meta 'collate_target', set once via
+        # `set-collate-target`). Runs after dedup so re-imported copies are
+        # already hidden; incremental, so it only copies files not yet under
+        # the target — cheap on every refresh once the initial collation is
+        # done. This is what keeps the fast local library (and its NAS mirror)
+        # current as new phone photos land in the ingestion roots.
+        _ct_conn = db.connect(cfg.db_path)
+        try:
+            collate_target = db.get_meta(_ct_conn, "collate_target", "")
+        finally:
+            _ct_conn.close()
+        if collate_target:
+            co_args = ["collate", collate_target, "--apply"]
+            phases.append(("collate", co_args, phase("collate", co_args)))
+
         phases.append(("cluster-faces", ["cluster-faces"],
                        phase("cluster-faces", ["cluster-faces"])))
 
@@ -3115,6 +3131,11 @@ def register(parent: typer.Typer) -> None:
             help="Update files.path to the new location after copying, so "
                  "the index (and all its thumbnails / ML work) follows the "
                  "consolidated tree."),
+        recollate: bool = typer.Option(
+            False, "--recollate",
+            help="Also reconsider files already living under the target "
+                 "(default: skip them — so re-runs only copy newly-ingested "
+                 "photos, which is what makes it cheap to run every refresh)."),
         limit: int = typer.Option(
             0, "--limit", help="Cap files processed (0 = all), for testing."),
     ) -> None:
@@ -3144,13 +3165,26 @@ def register(parent: typer.Typer) -> None:
         console = Console()
         target_root = Path(target).expanduser()
         try:
+            # Incremental by default: skip files already living under the
+            # target (they were collated on a prior run and re-pointed there),
+            # so a refresh-time collate only copies newly-ingested photos.
+            extra = ""
+            params: list = []
+            if not recollate:
+                extra = "AND f.path NOT LIKE ?"
+                params.append(str(target_root) + "/%")
             rows = conn.execute(
-                """SELECT f.id, f.path, f.content_hash, f.size, pm.taken_at
-                   FROM files f LEFT JOIN photo_meta pm ON pm.file_id = f.id
-                   WHERE f.dup_of IS NULL AND f.missing = 0
-                     AND f.content_hash != ''
-                   ORDER BY f.id"""
+                f"""SELECT f.id, f.path, f.content_hash, f.size, pm.taken_at
+                    FROM files f LEFT JOIN photo_meta pm ON pm.file_id = f.id
+                    WHERE f.dup_of IS NULL AND f.missing = 0
+                      AND f.content_hash != '' {extra}
+                    ORDER BY f.id""",
+                params,
             ).fetchall()
+            if not rows:
+                console.print("[green]nothing new to collate[/green] "
+                              "(everything's already in the tree)")
+                return
             if limit:
                 rows = rows[:limit]
 
@@ -3417,5 +3451,36 @@ def register(parent: typer.Typer) -> None:
                 "Import into Apple Photos: open Photos on your Mac, File → "
                 "Import, pick that folder (or drag it in). Photos reads EXIF "
                 "dates and de-dupes; iCloud Photos then syncs to your iPhone.")
+        finally:
+            conn.close()
+
+    @parent.command(name="set-collate-target")
+    def cmd_set_collate_target(
+        target: str = typer.Argument(
+            "", help="Path to the consolidated tree. Empty prints/clears it."),
+        clear: bool = typer.Option(
+            False, "--clear", help="Clear the collate target."),
+    ) -> None:
+        """Configure the tree `refresh` collates newly-ingested photos into.
+
+        Once set, every `refresh` runs an incremental `collate` so new photos
+        landing in the ingestion roots flow into the canonical local library
+        automatically. Run with no argument to show the current value.
+        """
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        try:
+            if clear:
+                db.set_meta(conn, "collate_target", "")
+                console.print("[yellow]collate target cleared[/yellow] — "
+                              "refresh will no longer collate.")
+            elif target:
+                db.set_meta(conn, "collate_target", target)
+                console.print(f"[green]collate target set:[/green] {target}")
+                console.print("`refresh` will now keep it current incrementally.")
+            else:
+                cur = db.get_meta(conn, "collate_target", "")
+                console.print(f"collate target: {cur or '(not set)'}")
         finally:
             conn.close()

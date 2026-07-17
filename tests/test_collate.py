@@ -62,8 +62,15 @@ def test_collate_builds_dedup_tree(tmp_path, monkeypatch):
     assert paths[a_id] == str(dst / "2003/04/24/a.jpg")
     assert paths[dup_id] == str(src / "dup.jpg")
 
-    # resumable: a second run copies nothing new
+    # incremental: a second run has nothing to do — the collated files were
+    # re-pointed under the target and are skipped at the query level.
     res2 = CliRunner().invoke(
         app, ["collate", str(dst), "--apply", "--workers", "2"])
     assert res2.exit_code == 0
-    assert "copied 0" in res2.output and "skipped 4" in res2.output
+    assert "nothing new to collate" in res2.output
+
+    # ...but --recollate reconsiders them (they're already present, so skipped).
+    res3 = CliRunner().invoke(
+        app, ["collate", str(dst), "--apply", "--recollate", "--workers", "2"])
+    assert res3.exit_code == 0
+    assert "skipped 4" in res3.output

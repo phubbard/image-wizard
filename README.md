@@ -301,6 +301,11 @@ image-wizard backfill-dates --redo --apply        # re-infer its own guesses
 # valid, nothing recomputes. Non-destructive, resumable, integrity-checked.
 image-wizard collate /Volumes/2TBSSD/photos            # dry run
 image-wizard collate /Volumes/2TBSSD/photos --apply    # copy + re-point index
+# Incremental by default: re-runs only copy files not already under the
+# target, so it's cheap. Wire it into refresh so new photos flow into the
+# canonical tree automatically:
+image-wizard set-collate-target /Volumes/2TBSSD/photos # refresh now collates
+image-wizard set-collate-target --clear                # stop
 
 # Export a FILTERED subset to a folder — e.g. to import into Apple Photos,
 # share, or archive. Original files (EXIF intact) so Photos reads the right
