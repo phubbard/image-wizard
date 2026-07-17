@@ -48,3 +48,21 @@ def test_date_only_defaults_to_noon():
 ])
 def test_rejects_non_dates(path):
     assert infer_date(path) is None
+
+
+def test_epoch_ms_filename():
+    # Dropbox/Android "Camera Uploads" — filename is an epoch-ms timestamp.
+    import datetime as _dt
+    got = infer_date("/Volumes/photo/Camera/1347491616193.jpg")
+    assert got is not None and got.startswith("2012-09")
+    expected = _dt.datetime.fromtimestamp(
+        1347491616193 / 1000, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
+    assert got[:10] == expected
+
+
+@pytest.mark.parametrize("path", [
+    "/x/9999999999999.jpg",   # 13 digits but decodes to ~2286 (out of range)
+    "/x/1234567890.jpg",      # 10 digits — deliberately NOT treated as epoch
+])
+def test_epoch_ms_guardrails(path):
+    assert infer_date(path) is None

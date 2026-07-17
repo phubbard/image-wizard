@@ -15,7 +15,7 @@ date (``IMG_12345678``) is rejected rather than mis-parsed.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
 # Plausible capture years. Digital photos didn't exist before ~1990; the
 # upper bound guards against random digit runs. (Scanned-in older prints
@@ -112,13 +112,35 @@ def _date_from_path(path: str) -> str | None:
     return None
 
 
+def _date_from_epoch_filename(name: str) -> str | None:
+    """A filename that *is* a 13-digit epoch-millisecond timestamp — the
+    Dropbox / Android "Camera Uploads" pattern, e.g. ``1347491616193.jpg``.
+
+    Only 13-digit (millisecond) values are accepted, not 10-digit seconds:
+    a bare 10-digit filename is too easily an ID that coincidentally lands
+    in the plausible-date range. The decoded date is still range-checked.
+    """
+    m = re.match(r"(\d{13})(?:\D|$)", name)
+    if not m:
+        return None
+    try:
+        dt = datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc)
+    except (OSError, ValueError, OverflowError):
+        return None
+    if not (_MIN_YEAR <= dt.year <= _MAX_YEAR):
+        return None
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def infer_date(path: str) -> str | None:
     """Best-effort capture date for a path, or None.
 
     Precedence: a date embedded in the *filename* (most specific to the
-    file) wins; then a ``YYYY/MM/DD`` folder path or spelled-out event
-    folder; then year/month only. Returns ``"YYYY-MM-DD HH:MM:SS"``.
+    file) — an explicit ``YYYYMMDD`` stamp, then a 13-digit epoch-ms name —
+    wins; then a ``YYYY/MM/DD`` folder path or spelled-out event folder;
+    then year/month only. Returns ``"YYYY-MM-DD HH:MM:SS"``.
     """
     import os
     name = os.path.basename(path)
-    return _date_from_filename(name) or _date_from_path(path)
+    return (_date_from_filename(name) or _date_from_epoch_filename(name)
+            or _date_from_path(path))
