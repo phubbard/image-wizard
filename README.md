@@ -291,6 +291,25 @@ image-wizard backfill-dates --path photoslibrary  # limit to one tree
 image-wizard backfill-dates --redo --apply        # re-infer its own guesses
 ```
 
+### Consolidate & export
+
+```bash
+# Collate the deduplicated library (one copy per photo — the dup_of-NULL
+# keepers) into ONE canonical, date-organized tree on fast local storage.
+# Copies bytes unchanged, so content_hash is identical and --repoint just
+# updates files.path — every thumbnail / embedding / face / OCR row stays
+# valid, nothing recomputes. Non-destructive, resumable, integrity-checked.
+image-wizard collate /Volumes/2TBSSD/photos            # dry run
+image-wizard collate /Volumes/2TBSSD/photos --apply    # copy + re-point index
+
+# Export a FILTERED subset to a folder — e.g. to import into Apple Photos,
+# share, or archive. Original files (EXIF intact) so Photos reads the right
+# dates and de-dupes on import. Never touches the index (unlike collate).
+image-wizard export ~/early-iphone --camera iPhone --before 2012        # dry run
+image-wizard export ~/early-iphone --camera iPhone --before 2012 --apply
+image-wizard export ~/of-anna --person "Anna" --flat --apply            # by person
+```
+
 ### Maintenance & repair
 
 ```bash

@@ -3261,3 +3261,161 @@ def register(parent: typer.Typer) -> None:
                 "scan_roots so `refresh` only walks the local tree.")
         finally:
             conn.close()
+
+    @parent.command(name="export")
+    def cmd_export(
+        target: str = typer.Argument(
+            ..., help="Folder to copy the matching photos into."),
+        camera: str = typer.Option(
+            "", "--camera", help="Only photos whose camera model matches "
+                                 "this substring (e.g. 'iPhone')."),
+        before: str = typer.Option(
+            "", "--before", help="Only photos taken before this date "
+                                 "(YYYY-MM-DD)."),
+        after: str = typer.Option(
+            "", "--after", help="Only photos taken on/after this date "
+                                "(YYYY-MM-DD)."),
+        person: str = typer.Option(
+            "", "--person", help="Only photos containing this named person."),
+        dated: bool = typer.Option(
+            True, "--dated/--flat",
+            help="Organize into YYYY/MM/DD/ subfolders (default), or dump "
+                 "everything into one flat folder."),
+        apply: bool = typer.Option(
+            False, "--apply", help="Actually copy (default is a dry run)."),
+        workers: int = typer.Option(4, "--workers", "-w"),
+        limit: int = typer.Option(0, "--limit", help="Cap files (0 = all)."),
+    ) -> None:
+        """Copy a filtered subset of the library into a folder.
+
+        For pulling a set out to import into Apple Photos, share, or archive
+        — e.g. ``export --camera iPhone --before 2012 <folder>`` gathers your
+        early iPhone photos. Copies the original files (EXIF intact) so
+        Photos reads the right capture dates and de-dupes on import. Visible
+        (deduplicated) photos only. Unlike `collate` this NEVER touches the
+        index or moves anything — it's a plain, additive copy. Dry-run by
+        default.
+        """
+        import os as _os
+        import shutil
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        cfg = config.load()
+        conn = db.connect(cfg.db_path)
+        console = Console()
+        target_root = Path(target).expanduser()
+        try:
+            where = ["f.missing = 0", "f.dup_of IS NULL",
+                     "f.content_hash != ''", "f.kind = 'image'"]
+            params: list = []
+            join = "LEFT JOIN photo_meta pm ON pm.file_id = f.id"
+            if camera:
+                where.append("pm.camera_model LIKE ?")
+                params.append(f"%{camera}%")
+            if before:
+                where.append("pm.taken_at < ?")
+                params.append(before)
+            if after:
+                where.append("pm.taken_at >= ?")
+                params.append(after)
+            if person:
+                where.append(
+                    "EXISTS (SELECT 1 FROM faces fa WHERE fa.file_id = f.id "
+                    "AND fa.person_name = ?)")
+                params.append(person)
+            rows = conn.execute(
+                f"""SELECT f.id, f.path, f.content_hash, f.size, pm.taken_at
+                    FROM files f {join}
+                    WHERE {' AND '.join(where)} ORDER BY pm.taken_at""",
+                params,
+            ).fetchall()
+            if limit:
+                rows = rows[:limit]
+            if not rows:
+                console.print("[yellow]no photos match those filters[/yellow]")
+                return
+
+            def _datedir(taken):
+                if (taken and len(taken) >= 10
+                        and taken[4] == "-" and taken[7] == "-"):
+                    return f"{taken[:4]}/{taken[5:7]}/{taken[8:10]}"
+                return "undated"
+
+            # Collision groups (same folder + filename, different photos).
+            groups: dict = defaultdict(set)
+            for r in rows:
+                sub = _datedir(r["taken_at"]) if dated else ""
+                groups[(sub, _os.path.basename(r["path"]).lower())].add(
+                    r["content_hash"])
+
+            def _target_for(r):
+                sub = _datedir(r["taken_at"]) if dated else ""
+                base = _os.path.basename(r["path"])
+                if len(groups[(sub, base.lower())]) > 1:
+                    stem, ext = _os.path.splitext(base)
+                    base = f"{stem}-{r['content_hash'][:8]}{ext}"
+                return (target_root / sub / base) if sub else (target_root / base)
+
+            total_bytes = sum(r["size"] or 0 for r in rows)
+            filt = ", ".join(f for f in (
+                f"camera~{camera!r}" if camera else "",
+                f"before {before}" if before else "",
+                f"after {after}" if after else "",
+                f"person {person!r}" if person else "") if f) or "all photos"
+            console.print(
+                f"[bold]{len(rows)} photos[/bold] ({total_bytes/1e9:.1f} GB) "
+                f"— {filt} → {target_root}")
+            for r in rows[:5]:
+                console.print(f"  {(r['taken_at'] or '?')[:10]}  "
+                              f"{_os.path.basename(r['path'])} → {_target_for(r)}")
+
+            if not apply:
+                console.print("\n[yellow]dry run[/yellow] — pass --apply to "
+                              "copy. The index and source files are untouched.")
+                return
+
+            def _copy_one(r):
+                dst = _target_for(r)
+                if dst.exists() and dst.stat().st_size == (r["size"] or -1):
+                    return "skip"
+                src = Path(r["path"])
+                if not src.exists():
+                    return "source-missing"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dst.with_name(dst.name + ".part")
+                try:
+                    shutil.copy2(src, tmp)
+                    _os.replace(tmp, dst)
+                    return "copied"
+                except OSError as e:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return f"error: {e}"
+
+            copied = skipped = errors = 0
+            from rich.progress import (Progress, BarColumn, MofNCompleteColumn,
+                                       SpinnerColumn, TimeRemainingColumn)
+            with Progress(SpinnerColumn(), BarColumn(), MofNCompleteColumn(),
+                          TimeRemainingColumn(),
+                          console=Console(stderr=True)) as prog, \
+                    ThreadPoolExecutor(max_workers=workers) as ex:
+                task = prog.add_task("export", total=len(rows))
+                for status in ex.map(_copy_one, rows):
+                    copied += status == "copied"
+                    skipped += status == "skip"
+                    if status not in ("copied", "skip"):
+                        errors += 1
+                    prog.advance(task)
+
+            console.print(
+                f"\n[green]exported {copied}[/green], skipped {skipped} "
+                f"(already there), errors {errors} → {target_root}")
+            console.print(
+                "Import into Apple Photos: open Photos on your Mac, File → "
+                "Import, pick that folder (or drag it in). Photos reads EXIF "
+                "dates and de-dupes; iCloud Photos then syncs to your iPhone.")
+        finally:
+            conn.close()
