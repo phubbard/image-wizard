@@ -44,6 +44,22 @@ WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=WEB_DIR / "templates")
 
 
+def _effective_visible_roots(
+    stored: list[str], current_roots: set[str]
+) -> list[str]:
+    """Intersect a stored visible-roots filter with the live scan roots.
+
+    A stored entry that is no longer a scan root — a root was pruned, or
+    ``collate`` re-pointed its files under a different root — is dropped.
+    If nothing stored survives, return ``[]`` (no filter, show everything)
+    so a drifted filter can never silently blank the Timeline. When some
+    stored roots are still valid, the user's subset choice is respected.
+    """
+    if not stored:
+        return []
+    return [p for p in stored if p in current_roots]
+
+
 def create_app(cfg: config.Config | None = None) -> FastAPI:
     if cfg is None:
         cfg = config.load()
@@ -93,9 +109,13 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
     # = show everything (default). Configured on /about.
 
     def _get_visible_roots(conn) -> list[str]:
-        """Return the list of currently-selected root paths.
+        """Return the effective list of selected root paths (self-healing).
 
-        Empty list = no filter = show everything.
+        Empty list = no filter = show everything. Stored entries that are
+        no longer scan roots are dropped; if none survive, the filter falls
+        back to 'show everything' so stale state (after a root prune, or a
+        collate that re-points paths under a new root) can't silently blank
+        the library.
         """
         import json
         raw = db.get_meta(conn, "visible_roots", "")
@@ -103,9 +123,11 @@ def create_app(cfg: config.Config | None = None) -> FastAPI:
             return []
         try:
             v = json.loads(raw)
-            return [str(p) for p in v] if isinstance(v, list) else []
+            stored = [str(p) for p in v] if isinstance(v, list) else []
         except Exception:
             return []
+        current = {r[0] for r in conn.execute("SELECT path FROM scan_roots")}
+        return _effective_visible_roots(stored, current)
 
     def _set_visible_roots(conn, roots: list[str]) -> None:
         import json

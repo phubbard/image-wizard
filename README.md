@@ -416,7 +416,7 @@ top. Once selecting, **Shift-click** also selects a whole range between
 two thumbnails, Finder-style — click the first, shift-click the last,
 everything between is selected. **Esc** leaves select mode.
 | **Nearby** (`/nearby?lat=&lon=&radius_km=`) | Photos within a chosen radius of any GPS-tagged photo (click the GPS row on a photo detail to launch a radius prompt). Sorted by distance. |
-| **About** (`/about`) | Library stats, scan timestamps, **directory multi-select**: check / uncheck which scanned roots are visible across Timeline / Search / Map / Nearby. The selection persists in the DB. A `⌖ filtered` pill appears in the nav of every page when a strict subset is active. |
+| **About** (`/about`) | Library stats, scan timestamps, **directory multi-select**: check / uncheck which scanned roots are visible across Timeline / Search / Map / Nearby. The selection persists in the DB. A `⌖ filtered` pill appears in the nav of every page when a strict subset is active. The filter is **self-healing**: stored roots that are no longer scan roots — after a prune, or once `collate` re-points files under a new root — are dropped automatically, and if none survive it reverts to *show everything*, so a stale selection can never silently blank the library. |
 
 ## Pipeline architecture
 
