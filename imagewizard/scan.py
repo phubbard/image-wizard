@@ -1438,6 +1438,12 @@ def register(parent: typer.Typer) -> None:
             help="Only re-generate thumbs for photos taken with this "
                  "camera_model (exact match).",
         ),
+        videos: bool = typer.Option(
+            False, "--videos",
+            help="Only regenerate video posters. Re-extracts each frame via "
+                 "AVFoundation, fixing sideways/HEVC posters cv2 produced. "
+                 "Implies --force.",
+        ),
     ) -> None:
         """Regenerate thumbnails.
 
@@ -1455,6 +1461,10 @@ def register(parent: typer.Typer) -> None:
         conn = db.connect(cfg.db_path)
         console = Console(stderr=True)
         try:
+            # --videos re-extracts posters (which changed backend), so it
+            # only makes sense as a forced rebuild.
+            eff_force = force or videos
+
             sql = "SELECT f.id, f.path, f.content_hash FROM files f"
             params: list = []
             where = ["f.missing=0"]
@@ -1462,6 +1472,8 @@ def register(parent: typer.Typer) -> None:
                 sql += " JOIN photo_meta pm ON pm.file_id = f.id"
                 where.append("pm.camera_model = ?")
                 params.append(camera)
+            if videos:
+                where.append("f.kind = 'video'")
             sql += " WHERE " + " AND ".join(where)
             rows = conn.execute(sql, params).fetchall()
             console.print(f"{len(rows)} candidate files")
@@ -1491,23 +1503,29 @@ def register(parent: typer.Typer) -> None:
                 console.print(f"  {len(todo)} files need rotation")
             else:
                 for r in rows:
-                    if force or not thumb_path(cfg.cache_dir, r["content_hash"]).exists():
+                    if eff_force or not thumb_path(cfg.cache_dir, r["content_hash"]).exists():
                         todo.append(r)
 
             if not todo:
                 console.print("nothing to do")
                 return
-            console.print(f"regenerating {len(todo)} thumbnails (force={force or rotated})")
+            console.print(f"regenerating {len(todo)} thumbnails (force={eff_force or rotated})")
 
             done = 0
             errors = 0
 
             def regen(row):
-                img = load_image(Path(row["path"]))
-                # rotated implies force — we know the cached thumb is wrong
+                p = Path(row["path"])
+                if p.suffix.lower() in VIDEO_EXTS:
+                    # Video poster — AVFoundation-first (decodes HEVC + upright).
+                    from .video import extract_poster
+                    img, _ = extract_poster(p)
+                else:
+                    img = load_image(p)
+                # rotated/videos imply force — we know the cached thumb is wrong
                 ensure_thumbnail(
                     img, cfg.cache_dir, row["content_hash"],
-                    force=force or rotated,
+                    force=eff_force or rotated,
                 )
 
             with ThreadPoolExecutor(max_workers=workers) as pool:

@@ -23,6 +23,10 @@ dependencies = [
     # Apple Silicon). Enables `image-wizard ocr` + full-text search.
     "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    # Video poster/frame extraction via AVFoundation + VideoToolbox: decodes
+    # HEVC (which cv2's bundled FFmpeg can't) and applies display rotation.
+    "pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreMedia>=10.0; sys_platform == 'darwin'",
     # Vector store
     "sqlite-vec>=0.1.6",
     # ML (CPU/MPS)

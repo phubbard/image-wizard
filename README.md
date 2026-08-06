@@ -19,6 +19,12 @@ because consecutive seek targets snap to the same keyframe — that's
 normal and the indexer dedupes them. The browser plays the file
 inline via `<video>` for compatible codecs.
 
+Video poster frames are decoded via **AVFoundation / VideoToolbox** on
+macOS: it decodes HEVC (which OpenCV's bundled FFmpeg can't on recent
+builds) in hardware, and applies the track's display-rotation transform
+so portrait clips come back upright — matching what Photos / QuickTime
+show. OpenCV is the fallback for formats AVFoundation rejects.
+
 All metadata, vectors, and thumbnails live in a single SQLite database with
 [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN search.
 
@@ -325,6 +331,9 @@ image-wizard regen-thumbs --rotated           # only thumbs with non-trivial
                                               # EXIF orientation (repairs sideways
                                               # thumbs cached by older code)
 image-wizard regen-thumbs --camera "iPhone"   # scope to one camera
+image-wizard regen-thumbs --videos            # re-extract every video poster
+                                              # (AVFoundation: fixes sideways +
+                                              # HEVC posters; implies --force)
 
 # Clean up the index
 image-wizard drop-small --min-pixels 320      # remove small images from DB

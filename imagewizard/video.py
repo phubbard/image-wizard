@@ -141,6 +141,20 @@ def extract_poster(
     If the video is shorter than ``ts_sec`` we walk back to the midpoint
     so we never fall off the end.
     """
+    # Prefer AVFoundation on macOS: it decodes HEVC (which cv2's bundled
+    # FFmpeg can't on recent builds) and applies the track's display-rotation
+    # transform, so portrait video comes back upright rather than sideways.
+    # Fall back to OpenCV when it can't produce a frame (non-macOS, or a
+    # format AVFoundation rejects).
+    try:
+        from . import video_avf
+        avf = video_avf.extract_poster(path, ts_sec)
+    except Exception:
+        avf = None
+    if avf is not None:
+        rgb, duration_sec = avf
+        return _downscale(rgb, max_pixels), duration_sec
+
     cap = _open(path)
     try:
         duration_sec = _duration_seconds(cap)
