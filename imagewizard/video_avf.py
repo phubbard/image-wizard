@@ -25,6 +25,14 @@ from PIL import Image
 
 _AVAILABLE: bool | None = None
 
+# Concurrent VideoToolbox decode sessions crash hard (a segfault threads
+# can't catch) — a 6-worker batch reliably died in the HEVC-dense range,
+# while single-threaded sailed through the same files. The pipeline decodes
+# in a ThreadPoolExecutor, so serialize the actual frame generation. Poster
+# extraction is a small slice of pipeline work and still runs ~30/sec, so
+# this costs little; image decode (the bulk) stays fully parallel.
+_SESSION = threading.Semaphore(1)
+
 
 def available() -> bool:
     """True if the AVFoundation pyobjc frameworks can be imported."""
@@ -88,7 +96,7 @@ def extract_poster(
         finally:
             done.set()
 
-    with warnings.catch_warnings():
+    with _SESSION, warnings.catch_warnings():
         # pyobjc emits an ObjCPointerWarning for the CGImageRef arg; benign.
         warnings.simplefilter("ignore")
         gen.generateCGImageAsynchronouslyForTime_completionHandler_(t, handler)

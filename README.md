@@ -23,7 +23,10 @@ Video poster frames are decoded via **AVFoundation / VideoToolbox** on
 macOS: it decodes HEVC (which OpenCV's bundled FFmpeg can't on recent
 builds) in hardware, and applies the track's display-rotation transform
 so portrait clips come back upright — matching what Photos / QuickTime
-show. OpenCV is the fallback for formats AVFoundation rejects.
+show. OpenCV is the fallback for formats AVFoundation rejects. VideoToolbox
+decode sessions are serialized (concurrent HEVC sessions crash hard), so the
+pipeline parallelizes image decode freely while video posters extract one at
+a time — still ~30/sec, a small slice of the work.
 
 All metadata, vectors, and thumbnails live in a single SQLite database with
 [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN search.
